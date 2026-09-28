@@ -271,13 +271,13 @@ license-check:
   runs-on: ubuntu-latest
   steps:
     - uses: actions/checkout@v4
-    - uses: licguard/action@v0          # installs licguard and restores its cache
+    - uses: baotista/licguard@v0        # installs licguard and restores its cache
     - run: licguard check --format github
 ```
 
 `--format github` emits annotations (visible on the lockfile in the pull request diff) and a Markdown job summary. SARIF upload to Code Scanning (P1) needs a public repository or GitHub Advanced Security.
 
-**Distribution**: GitHub Releases (via `cargo-dist`), crates.io, Homebrew, a public container image on ghcr.io, and a GitHub Marketplace action.
+**Distribution**: GitHub Releases (via `cargo-dist`), crates.io, Homebrew, a public container image (`ghcr.io/baotista/licguard`), and a GitHub Marketplace action published from this repository (`baotista/licguard`).
 
 ## Roadmap
 
@@ -311,4 +311,4 @@ The main risk is license metadata quality, not technology: it drives the false-p
 - [ ] Minimum supported Rust version (MSRV).
 - [ ] How do we measure adoption of a public tool (downloads, Marketplace installs, stars)?
 - [ ] Which report format should GitLab get (Code Quality JSON?) — to verify before F-30.
-- [ ] Reserve the `licguard` name on crates.io and the `licguard` GitHub organization (both free as of 2026-09-28).
+- [ ] Reserve the `licguard` name on crates.io (free as of 2026-09-28).
