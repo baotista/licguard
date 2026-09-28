@@ -20,6 +20,7 @@ struct Lockfile {
 #[derive(Deserialize)]
 struct LockEntry {
     version: Option<String>,
+    license: Option<serde_json::Value>,
     #[serde(default)]
     link: bool,
 }
@@ -27,12 +28,13 @@ struct LockEntry {
 #[derive(Deserialize)]
 struct InstalledManifest {
     version: Option<String>,
-    license: Option<String>,
+    license: Option<serde_json::Value>,
 }
 
-/// Reads the Project's `package-lock.json` and returns its Packages, each
-/// with the Declared license of its installed copy when that copy's version
-/// matches the lockfile.
+/// Reads the Project's `package-lock.json` and returns its Packages with
+/// their Declared license, taken from the first License origin that has one:
+/// the installed copy (only when its version matches the lockfile), then the
+/// lockfile entry itself.
 pub fn inventory(root: &Path) -> Result<Vec<LicensedPackage>> {
     let path = root.join(LOCKFILE);
     let text = fs::read_to_string(&path).map_err(|err| {
@@ -63,7 +65,8 @@ pub fn inventory(root: &Path) -> Result<Vec<LicensedPackage>> {
             bail!("{}: entry `{key}` has no version", path.display());
         };
         packages.push(LicensedPackage {
-            declared_license: installed_license(&root.join(key), version),
+            declared_license: installed_license(&root.join(key), version)
+                .or_else(|| entry.license.as_ref().and_then(license_string)),
             package: Package {
                 ecosystem: Ecosystem::Npm,
                 name: name.to_string(),
@@ -85,5 +88,10 @@ fn installed_license(dir: &Path, version: &str) -> Option<String> {
     if manifest.version.as_deref() != Some(version) {
         return None;
     }
-    manifest.license
+    manifest.license.as_ref().and_then(license_string)
+}
+
+/// Legacy object forms of the `license` field are not understood yet.
+fn license_string(license: &serde_json::Value) -> Option<String> {
+    license.as_str().map(str::to_string)
 }

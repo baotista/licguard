@@ -53,6 +53,16 @@ impl Project {
         self
     }
 
+    /// Edits the `packages` map of the Project's `package-lock.json`.
+    fn edit_lockfile(self, edit: impl FnOnce(&mut serde_json::Value)) -> Self {
+        let path = self.dir.path().join("package-lock.json");
+        let mut lockfile: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        edit(&mut lockfile["packages"]);
+        fs::write(path, serde_json::to_string_pretty(&lockfile).unwrap()).unwrap();
+        self
+    }
+
     fn check(&self) -> assert_cmd::assert::Assert {
         Command::cargo_bin("licguard")
             .unwrap()
@@ -138,30 +148,77 @@ const ALLOW_ALL: &str = r#"
 #[test]
 fn installed_copy_with_another_version_is_ignored() {
     Project::from_fixture("npm-basic")
-        .with_policy(ALLOW_ALL)
+        .with_policy(DENY_ISC)
         .replace_in(
             "node_modules/once/package.json",
             r#""version": "1.4.0""#,
             r#""version": "1.3.3""#,
         )
+        .replace_in(
+            "node_modules/once/package.json",
+            r#""license": "ISC""#,
+            r#""license": "MIT""#,
+        )
         .check()
         .code(1)
         .stdout(predicate::str::contains(
-            "DENY    (unresolved)    once@1.4.0",
+            "DENY    ISC             once@1.4.0",
         ));
 }
 
 #[test]
-fn package_not_installed_is_unresolved() {
+fn package_not_installed_uses_the_lockfile_license() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .remove("node_modules/wrappy")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             wrappy@1.0.2",
+        ));
+}
+
+#[test]
+fn optional_package_for_another_platform_uses_the_lockfile_license() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .edit_lockfile(|packages| {
+            packages["node_modules/@esbuild/linux-x64"] = serde_json::json!({
+                "version": "0.21.5",
+                "cpu": ["x64"],
+                "license": "MIT",
+                "optional": true,
+                "os": ["linux"],
+            });
+        })
+        .check()
+        .success()
+        .stdout(predicate::str::contains("7 packages (npm)"));
+}
+
+#[test]
+fn package_with_no_license_anywhere_is_unresolved() {
     Project::from_fixture("npm-basic")
         .with_policy(ALLOW_ALL)
         .remove("node_modules/wrappy")
+        .edit_lockfile(|packages| {
+            packages["node_modules/wrappy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("license");
+        })
         .check()
         .code(1)
         .stdout(predicate::str::contains(
             "DENY    (unresolved)    wrappy@1.0.2",
         ));
 }
+
+const DENY_ISC: &str = r#"
+    [policy]
+    allow = ["MIT"]
+    deny = ["ISC"]
+"#;
 
 const DENY_MIT: &str = r#"
     [policy]
