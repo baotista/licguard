@@ -42,7 +42,7 @@ impl Policy {
             toml::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
         let policy = config.policy;
         for id in policy.allow.iter().chain(&policy.deny) {
-            if spdx::license_id(id).is_none() {
+            if spdx_id(id).is_none() {
                 bail!(
                     "{}: `{id}` is not an SPDX license identifier\nhint: see https://spdx.org/licenses/",
                     path.display()
@@ -69,5 +69,14 @@ impl Policy {
 /// Normalizes a Declared license. Only plain SPDX license identifiers are
 /// understood for now; anything else is Unresolved.
 pub fn normalize(declared: &str) -> Option<String> {
-    spdx::license_id(declared.trim()).map(|id| id.name.to_string())
+    spdx_id(declared.trim()).map(str::to_string)
+}
+
+/// The canonical SPDX license identifier equal to `id`, if any.
+/// `spdx::license_id` silently drops a trailing `+`, which would turn
+/// `GPL-2.0+` into `GPL-2.0`; an exact match is required instead.
+fn spdx_id(id: &str) -> Option<&'static str> {
+    spdx::license_id(id)
+        .map(|license| license.name)
+        .filter(|name| *name == id)
 }

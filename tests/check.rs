@@ -279,3 +279,28 @@ fn declared_license_that_is_not_spdx_is_unresolved() {
         .code(1)
         .stdout(predicate::str::contains("DENY    (unresolved)    ms@2.1.3"));
 }
+
+#[test]
+fn or_later_suffix_in_policy_is_rejected_until_expressions_are_supported() {
+    Project::from_fixture("npm-basic")
+        .with_policy("[policy]\ndeny = [\"GPL-2.0+\"]\n")
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "`GPL-2.0+` is not an SPDX license identifier",
+        ));
+}
+
+#[test]
+fn declared_license_with_or_later_suffix_is_unresolved_until_expressions_are_supported() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .replace_in(
+            "node_modules/ms/package.json",
+            r#""license": "MIT""#,
+            r#""license": "MIT+""#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("DENY    (unresolved)    ms@2.1.3"));
+}
