@@ -1,0 +1,281 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use assert_cmd::Command;
+use predicates::prelude::*;
+use tempfile::TempDir;
+
+/// A copy of a fixture Project in a temporary directory, so each test can
+/// write its own Policy or alter the installed packages.
+struct Project {
+    dir: TempDir,
+}
+
+impl Project {
+    fn from_fixture(name: &str) -> Self {
+        let dir = TempDir::new().unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        copy_dir(&fixture, dir.path());
+        Project { dir }
+    }
+
+    fn path(&self) -> PathBuf {
+        self.dir.path().to_path_buf()
+    }
+
+    fn with_policy(self, toml: &str) -> Self {
+        fs::write(self.dir.path().join("licguard.toml"), toml).unwrap();
+        self
+    }
+
+    fn replace_in(self, file: &str, from: &str, to: &str) -> Self {
+        let path = self.dir.path().join(file);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(from), "{file} does not contain {from}");
+        fs::write(path, text.replacen(from, to, 1)).unwrap();
+        self
+    }
+
+    fn remove(self, relative: &str) -> Self {
+        let path = self.dir.path().join(relative);
+        if path.is_dir() {
+            fs::remove_dir_all(path).unwrap();
+        } else {
+            fs::remove_file(path).unwrap();
+        }
+        self
+    }
+
+    fn rename(self, from: &str, to: &str) -> Self {
+        fs::rename(self.dir.path().join(from), self.dir.path().join(to)).unwrap();
+        self
+    }
+
+    fn check(&self) -> assert_cmd::assert::Assert {
+        Command::cargo_bin("licguard")
+            .unwrap()
+            .arg("check")
+            .arg(self.path())
+            .assert()
+    }
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+#[test]
+fn project_with_only_allowed_licenses_passes() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = []
+            "#,
+        )
+        .check()
+        .success()
+        .stdout(predicate::str::contains("6 packages (npm)"))
+        .stdout(predicate::str::contains("6 allow"));
+}
+
+#[test]
+fn denied_license_is_a_violation() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT"]
+            deny = ["ISC"]
+            "#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             once@1.4.0",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    ISC             wrappy@1.0.2",
+        ))
+        .stdout(predicate::str::contains("2 deny · 0 review · 4 allow"))
+        .stdout(predicate::str::contains("✗ Policy violated (exit 1)"));
+}
+
+#[test]
+fn license_in_no_list_is_reviewed_without_failing() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT"]
+            "#,
+        )
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  ISC             once@1.4.0",
+        ))
+        .stdout(predicate::str::contains("0 deny · 2 review · 4 allow"));
+}
+
+const ALLOW_ALL: &str = r#"
+    [policy]
+    allow = ["MIT", "ISC"]
+"#;
+
+#[test]
+fn installed_copy_with_another_version_is_ignored() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .replace_in(
+            "node_modules/once/package.json",
+            r#""version": "1.4.0""#,
+            r#""version": "1.3.3""#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    once@1.4.0",
+        ));
+}
+
+#[test]
+fn package_not_installed_is_unresolved() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .remove("node_modules/wrappy")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    wrappy@1.0.2",
+        ));
+}
+
+const DENY_MIT: &str = r#"
+    [policy]
+    allow = ["ISC"]
+    deny = ["MIT"]
+"#;
+
+#[test]
+fn packages_are_listed_by_verdict_then_name_in_stable_order() {
+    let project = Project::from_fixture("npm-basic").with_policy(
+        r#"
+        [policy]
+        deny = ["ISC"]
+        "#,
+    );
+    let first = project.check().code(1).get_output().stdout.clone();
+    let second = project.check().code(1).get_output().stdout.clone();
+    assert_eq!(first, second);
+
+    let stdout = String::from_utf8(first).unwrap();
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with("DENY") || l.starts_with("REVIEW"))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "DENY    ISC             once@1.4.0",
+            "DENY    ISC             wrappy@1.0.2",
+            "REVIEW  MIT             @types/ms@0.7.34",
+            "REVIEW  MIT             debug@4.3.4",
+            "REVIEW  MIT             ms@2.1.2",
+            "REVIEW  MIT             ms@2.1.3",
+        ]
+    );
+}
+
+#[test]
+fn lockfile_v2_is_supported() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_MIT)
+        .remove("package-lock.json")
+        .rename("package-lock.v2.json", "package-lock.json")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("6 packages (npm)"))
+        .stdout(predicate::str::contains("DENY    MIT             ms@2.1.2"));
+}
+
+#[test]
+fn missing_lockfile_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .remove("package-lock.json")
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("package-lock.json"))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn lockfile_v1_is_rejected_with_a_fix() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .replace_in(
+            "package-lock.json",
+            r#""lockfileVersion": 3"#,
+            r#""lockfileVersion": 1"#,
+        )
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("lockfileVersion 1"))
+        .stderr(predicate::str::contains("npm 7 or later"));
+}
+
+#[test]
+fn missing_policy_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("licguard.toml"))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn malformed_policy_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy("[policy]\nallow = MIT\n")
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("licguard.toml is invalid"));
+}
+
+#[test]
+fn unknown_license_identifier_in_policy_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy("[policy]\nallow = [\"Apache 2\"]\n")
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "`Apache 2` is not an SPDX license identifier",
+        ));
+}
+
+#[test]
+fn declared_license_that_is_not_spdx_is_unresolved() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .replace_in(
+            "node_modules/ms/package.json",
+            r#""license": "MIT""#,
+            r#""license": "SEE LICENSE IN LICENSE""#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("DENY    (unresolved)    ms@2.1.3"));
+}
