@@ -644,3 +644,21 @@ fn compound_expression_in_policy_is_a_runtime_error() {
             "`MIT OR ISC` is not an SPDX license identifier, optionally followed by `WITH <exception>`",
         ));
 }
+
+#[test]
+fn deprecated_license_identifiers_are_still_understood() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["GPL-3.0"]
+            "#,
+        )
+        .declare_ms_license("GPL-3.0")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    GPL-3.0         ms@2.1.3\n",
+        ));
+}

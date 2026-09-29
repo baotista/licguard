@@ -121,8 +121,7 @@ impl Policy {
                 elected: None,
             };
         };
-        let expression =
-            spdx::Expression::parse(license).expect("a Normalized license is a valid expression");
+        let expression = parse(license).expect("a Normalized license is a valid expression");
         // The expression comes in postfix order: evaluate it with a stack of
         // (verdict, reason, license with each `OR` replaced by its elected option).
         let mut stack: Vec<(Verdict, Reason, String)> = Vec::new();
@@ -194,9 +193,20 @@ impl Policy {
 /// not a valid one.
 pub fn normalize(declared: &str) -> Option<String> {
     let declared = declared.trim();
-    spdx::Expression::parse(declared)
-        .ok()
-        .map(|_| declared.to_string())
+    parse(declared).ok().map(|_| declared.to_string())
+}
+
+/// Strict SPDX parsing, except that deprecated identifiers (e.g. `GPL-3.0`)
+/// are accepted as they are; mapping them to current ones comes with alias
+/// normalization.
+fn parse(expression: &str) -> Result<spdx::Expression, spdx::ParseError> {
+    spdx::Expression::parse_mode(
+        expression,
+        spdx::ParseMode {
+            allow_deprecated: true,
+            ..spdx::ParseMode::STRICT
+        },
+    )
 }
 
 /// `GPL-2.0-or-later` -> `GPL-2.0-only`; `Apache-2.0+` -> `Apache-2.0`.
@@ -220,7 +230,7 @@ fn base_version(license: &LicenseItem) -> Option<LicenseItem> {
 /// A policy entry is a single license term (`MIT`, `Apache-2.0+`,
 /// `GPL-2.0-only WITH Classpath-exception-2.0`) written in canonical form.
 fn is_policy_entry(entry: &str) -> bool {
-    let Ok(expression) = spdx::Expression::parse(entry) else {
+    let Ok(expression) = parse(entry) else {
         return false;
     };
     let mut nodes = expression.iter();
