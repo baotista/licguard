@@ -2308,16 +2308,18 @@ fn yarn_lockfile_in_no_known_format_is_a_runtime_error() {
 #[test]
 fn yarn_lockfile_without_its_package_json_is_a_runtime_error() {
     for (fixture, manifest) in [
-        ("yarn-v1", "package.json"),
-        ("yarn-berry", "packages/ui/package.json"),
+        ("yarn-v1", vec!["package.json"]),
+        ("yarn-berry", vec!["packages", "ui", "package.json"]),
     ] {
+        // The path is shown with the platform's separators.
+        let shown: PathBuf = manifest.iter().collect();
         Project::from_fixture(fixture)
             .with_policy(DENY_ALL)
-            .remove(manifest)
+            .remove(&manifest.join("/"))
             .check()
             .code(2)
             .stderr(predicate::str::contains("cannot read"))
-            .stderr(predicate::str::contains(manifest))
+            .stderr(predicate::str::contains(shown.display().to_string()))
             .stderr(predicate::str::contains("hint:"));
     }
 }

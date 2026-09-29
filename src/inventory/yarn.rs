@@ -124,7 +124,10 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         .unwrap_or_default();
     let mut roots = vec![(root.to_path_buf(), root_name, root_manifest)];
     for dir in &member_dirs {
-        let dir = root.join(dir);
+        // With the platform's separators, for the messages.
+        let dir: PathBuf = dir
+            .split('/')
+            .fold(root.to_path_buf(), |dir, segment| dir.join(segment));
         let manifest = manifest(&dir)?;
         let name = manifest
             .name
