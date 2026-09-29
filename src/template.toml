@@ -47,4 +47,4 @@ include_dev = false
 # version = "2.1.0"          # optional: all versions if absent
 # license = "LGPL-3.0-only"  # the license the Waiver tolerates
 # reason = "Approved by legal, ticket LEGAL-142"
-# expires = "2027-01-01"     # YYYY-MM-DD
+# expires = "2099-12-31"     # YYYY-MM-DD: set a real review date

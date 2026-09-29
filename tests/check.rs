@@ -2717,6 +2717,8 @@ fn init_template_examples_are_valid_once_uncommented() {
         keys("waivers"),
         [["expires", "license", "package", "reason", "version"]]
     );
+    // A placeholder that never looks like a real date that has passed.
+    assert_eq!(config["waivers"][0]["expires"].as_str(), Some("2099-12-31"));
 
     project
         .with_policy(&uncommented)
