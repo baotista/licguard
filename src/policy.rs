@@ -97,6 +97,9 @@ pub struct Policy {
     /// Whether `dev` Dependencies are evaluated too.
     #[serde(default)]
     pub include_dev: bool,
+    /// How many days before its expiry date a Waiver yields a Warning.
+    #[serde(default = "default_waiver_expiry_warning_days")]
+    pub waiver_expiry_warning_days: u32,
     /// The `[[clarifications]]` entries, which sit beside `[policy]`.
     #[serde(skip)]
     pub clarifications: Vec<Clarification>,
@@ -111,6 +114,10 @@ fn default_unresolved() -> Verdict {
 
 fn default_unlisted() -> Verdict {
     Verdict::Review
+}
+
+fn default_waiver_expiry_warning_days() -> u32 {
+    30
 }
 
 impl Policy {

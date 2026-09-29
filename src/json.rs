@@ -54,14 +54,18 @@ pub fn check(evaluation: &Evaluation, strict: bool, violated: bool) -> String {
     })
 }
 
-/// A Warning: its kind, its text as in the terminal report, and the Package
-/// it is about.
+/// A Warning: its kind, its text as in the terminal report, the Package it
+/// is about and, for a Waiver, its expiry date and the days left.
 #[derive(Serialize)]
 struct WarningJson<'a> {
     kind: &'static str,
     message: String,
     package: &'a str,
     version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    days: Option<u32>,
 }
 
 impl<'a> From<&'a Warning> for WarningJson<'a> {
@@ -73,6 +77,45 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
                 message,
                 package,
                 version: version.as_deref(),
+                expires: None,
+                days: None,
+            },
+            Warning::UnmatchedWaiver {
+                package,
+                version,
+                expires,
+            } => WarningJson {
+                kind: "unmatched_waiver",
+                message,
+                package,
+                version: version.as_deref(),
+                expires: Some(expires.to_string()),
+                days: None,
+            },
+            Warning::ExpiredWaiver {
+                package,
+                version,
+                expires,
+            } => WarningJson {
+                kind: "expired_waiver",
+                message,
+                package,
+                version: version.as_deref(),
+                expires: Some(expires.to_string()),
+                days: None,
+            },
+            Warning::ExpiringWaiver {
+                package,
+                version,
+                expires,
+                days,
+            } => WarningJson {
+                kind: "expiring_waiver",
+                message,
+                package,
+                version: version.as_deref(),
+                expires: Some(expires.to_string()),
+                days: Some(*days),
             },
         }
     }

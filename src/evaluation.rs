@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use crate::date::Date;
 use crate::inventory::{self, LicenseOrigin, Package, Scope};
 use crate::policy::{Policy, Reason, Verdict};
 use crate::warning::Warning;
@@ -68,6 +69,7 @@ impl Evaluation {
 /// are included when `include_dev` or the Policy says so.
 pub fn evaluate(project: &Path, include_dev: bool) -> Result<Evaluation> {
     let policy = Policy::load(project)?;
+    let today = Date::today()?;
     let include_dev = include_dev || policy.include_dev;
     let inventory = inventory::inventory(project)?;
     // Matched against the whole inventory: a clarification for an
@@ -81,11 +83,10 @@ pub fn evaluate(project: &Path, include_dev: bool) -> Result<Evaluation> {
             version: c.version.clone(),
         })
         .collect();
-    warnings.sort();
-    let evaluated = inventory
+    // The Normalized license of every Package, before `dev` filtering.
+    let licensed: Vec<_> = inventory
         .packages
         .into_iter()
-        .filter(|p| include_dev || p.scope == Scope::Prod)
         .map(|p| {
             let clarification = clarification::find(&policy.clarifications, &p.package);
             // A clarification's license is already a Normalized license.
@@ -96,11 +97,52 @@ pub fn evaluate(project: &Path, include_dev: bool) -> Result<Evaluation> {
                     p.license_origin,
                 ),
             };
+            (p, license, origin)
+        })
+        .collect();
+    // Matched against the whole inventory too: a Waiver for an excluded
+    // `dev` Dependency still applies to something.
+    for w in &policy.waivers {
+        let (package, version, expires) = (w.package.clone(), w.version.clone(), w.expires);
+        let days = today.days_until(w.expires);
+        if !licensed
+            .iter()
+            .any(|(p, license, _)| w.matches(&p.package, license.as_deref()))
+        {
+            warnings.push(Warning::UnmatchedWaiver {
+                package,
+                version,
+                expires,
+            });
+        } else if w.is_expired(today) {
+            warnings.push(Warning::ExpiredWaiver {
+                package,
+                version,
+                expires,
+            });
+        } else if days <= i64::from(policy.waiver_expiry_warning_days) {
+            warnings.push(Warning::ExpiringWaiver {
+                package,
+                version,
+                expires,
+                days: days as u32,
+            });
+        }
+    }
+    warnings.sort();
+    let waivers: Vec<_> = policy
+        .waivers
+        .iter()
+        .filter(|w| !w.is_expired(today))
+        .collect();
+    let evaluated = licensed
+        .into_iter()
+        .filter(|(p, _, _)| include_dev || p.scope == Scope::Prod)
+        .map(|(p, license, origin)| {
             let mut outcome = policy.evaluate(license.as_deref());
             // A Waiver tolerates the Verdict, never changes the license.
             if outcome.verdict != Verdict::Allow
-                && policy
-                    .waivers
+                && waivers
                     .iter()
                     .any(|w| w.matches(&p.package, license.as_deref()))
             {

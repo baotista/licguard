@@ -9,7 +9,14 @@ use tempfile::TempDir;
 /// write its own Policy or alter the installed packages.
 struct Project {
     dir: TempDir,
+    /// Environment variables set (`Some`) or removed (`None`) for the
+    /// commands run on the Project.
+    env: Vec<(String, Option<String>)>,
 }
+
+/// The date `LICGUARD_TODAY` pins by default, so that no test depends on the
+/// day it runs.
+const TODAY: &str = "2026-06-01";
 
 impl Project {
     fn from_fixture(name: &str) -> Self {
@@ -18,7 +25,10 @@ impl Project {
             .join("tests/fixtures")
             .join(name);
         copy_dir(&fixture, dir.path());
-        Project { dir }
+        Project {
+            dir,
+            env: Vec::new(),
+        }
     }
 
     fn path(&self) -> PathBuf {
@@ -27,6 +37,19 @@ impl Project {
 
     fn with_policy(self, toml: &str) -> Self {
         fs::write(self.dir.path().join("licguard.toml"), toml).unwrap();
+        self
+    }
+
+    /// Sets the environment variable `key` for the commands run on the Project.
+    fn with_env(mut self, key: &str, value: &str) -> Self {
+        self.env.push((key.to_string(), Some(value.to_string())));
+        self
+    }
+
+    /// Removes the environment variable `key` for the commands run on the
+    /// Project.
+    fn without_env(mut self, key: &str) -> Self {
+        self.env.push((key.to_string(), None));
         self
     }
 
@@ -107,12 +130,18 @@ impl Project {
 
     /// Runs `licguard <command>` on the Project, with `args` after its path.
     fn run(&self, command: &str, args: &[&str]) -> assert_cmd::assert::Assert {
-        Command::cargo_bin("licguard")
-            .unwrap()
-            .arg(command)
+        let mut cmd = Command::cargo_bin("licguard").unwrap();
+        cmd.arg(command)
             .arg(self.path())
             .args(args)
-            .assert()
+            .env("LICGUARD_TODAY", TODAY);
+        for (key, value) in &self.env {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
+        cmd.assert()
     }
 }
 
@@ -1802,6 +1831,8 @@ fn waiver_expiry_date_is_a_string_or_a_toml_local_date() {
     ] {
         Project::from_fixture("npm-basic")
             .with_policy(&format!("{DENY_MIT}{}", waiver_expiring(expires)))
+            // Before every date above, so that no Waiver has expired.
+            .with_env("LICGUARD_TODAY", "2000-01-01")
             .check()
             .code(1)
             .stdout(predicate::str::contains("(2 waived)"));
@@ -2648,6 +2679,7 @@ fn init_template_sets_every_list_and_setting_with_a_comment() {
         unresolved = "deny"
         unlisted = "review"
         include_dev = false
+        waiver_expiry_warning_days = 30
         "#,
     )
     .unwrap();
@@ -2661,6 +2693,7 @@ fn init_template_sets_every_list_and_setting_with_a_comment() {
         "unresolved",
         "unlisted",
         "include_dev",
+        "waiver_expiry_warning_days",
     ] {
         let at = lines
             .iter()
@@ -2758,5 +2791,280 @@ fn init_in_a_missing_directory_is_a_runtime_error() {
         .stderr(predicate::str::contains("cannot write"))
         .stderr(predicate::str::contains(
             "hint: check that the directory exists and is writable",
+        ));
+}
+
+#[test]
+fn waiver_expiring_within_the_warning_days_still_applies_and_is_a_warning() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_MIT}{}", waiver_expiring("\"2026-06-11\"")))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "\n\nwarning: waiver for ms expires in 10 days (2026-06-11)\n\n2 deny · 0 review · 4 allow (2 waived)\n",
+        ));
+}
+
+#[test]
+fn waiver_expiry_warning_starts_waiver_expiry_warning_days_ahead_and_lasts_until_its_expiry_day() {
+    for (expires, warning) in [
+        ("2026-06-01", Some("expires today (2026-06-01)")),
+        ("2026-06-02", Some("expires in 1 day (2026-06-02)")),
+        ("2026-07-01", Some("expires in 30 days (2026-07-01)")),
+        ("2026-07-02", None),
+    ] {
+        let assert = Project::from_fixture("npm-basic")
+            .with_policy(&format!(
+                "{DENY_MIT}{}",
+                waiver_expiring(&format!("\"{expires}\""))
+            ))
+            .check()
+            .code(1)
+            .stdout(predicate::str::contains("(2 waived)"));
+        match warning {
+            Some(warning) => assert.stdout(predicate::str::contains(format!(
+                "warning: waiver for ms {warning}\n"
+            ))),
+            None => assert.stdout(predicate::str::contains("warning:").not()),
+        };
+    }
+}
+
+#[test]
+fn waiver_matching_no_package_is_a_warning_that_does_not_fail_the_gate() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}{}{}",
+            // The package was removed, its version or its license changed.
+            waiver("left-pad", None, "MIT"),
+            waiver("ms", Some("9.9.9"), "MIT"),
+            waiver("once", Some("1.4.0"), "MIT"),
+        ))
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "(npm)\n\n\
+             warning: waiver for left-pad matches no Package\n\
+             warning: waiver for ms@9.9.9 matches no Package\n\
+             warning: waiver for once@1.4.0 matches no Package\n\n\
+             0 deny · 0 review · 6 allow\n✓ Policy respected\n",
+        ));
+}
+
+#[test]
+fn waiver_both_unmatched_and_expired_is_only_reported_as_unmatched() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}",
+            waiver_expiring("\"2026-05-31\"").replace("\"MIT\"", "\"ISC\"")
+        ))
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "\n\nwarning: waiver for ms matches no Package\n\n",
+        ));
+}
+
+#[test]
+fn waiver_of_an_excluded_dev_dependency_is_not_a_warning() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_GPL}{}",
+            waiver("test-kit", None, "GPL-3.0-only")
+        ))
+        .edit_lockfile(add_dev_dependency)
+        .check()
+        .success()
+        .stdout(predicate::str::contains("warning:").not());
+}
+
+#[test]
+fn waiver_expiry_warning_days_setting_sets_how_early_the_warning_starts() {
+    for (days, expires, warns) in [
+        (7, "2026-06-08", true),
+        (7, "2026-06-09", false),
+        (0, "2026-06-01", true),
+        (0, "2026-06-02", false),
+        (365, "2027-06-01", true),
+    ] {
+        let assert = Project::from_fixture("npm-basic")
+            .with_policy(&format!(
+                "[policy]\nallow = [\"ISC\"]\ndeny = [\"MIT\"]\nwaiver_expiry_warning_days = {days}\n{}",
+                waiver_expiring(&format!("\"{expires}\""))
+            ))
+            .check()
+            .code(1);
+        let warning = predicate::str::contains("warning: waiver for ms expires");
+        if warns {
+            assert.stdout(warning);
+        } else {
+            assert.stdout(warning.not());
+        }
+    }
+}
+
+#[test]
+fn waiver_expiry_warning_days_that_is_not_a_non_negative_integer_is_a_runtime_error() {
+    for days in ["-1", "\"30\"", "7.5", "true"] {
+        Project::from_fixture("npm-basic")
+            .with_policy(&format!(
+                "[policy]\nallow = [\"MIT\", \"ISC\"]\nwaiver_expiry_warning_days = {days}\n"
+            ))
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains("licguard.toml is invalid"))
+            .stderr(predicate::str::contains("waiver_expiry_warning_days"));
+    }
+}
+
+#[test]
+fn expired_waiver_no_longer_applies_and_is_a_warning() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_MIT}{}", waiver_expiring("\"2026-05-31\"")))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("DENY    MIT             ms@2.1.3"))
+        .stdout(predicate::str::contains(
+            "\n\nwarning: waiver for ms expired on 2026-05-31\n\n4 deny · 0 review · 2 allow\n✗ Policy violated (exit 1)\n",
+        ));
+}
+
+#[test]
+fn days_before_a_waiver_expiry_are_counted_across_months_years_and_leap_days() {
+    for (today, expires, days) in [
+        ("2026-12-31", "2027-01-01", "in 1 day"),
+        ("2028-02-28", "2028-03-01", "in 2 days"),
+        ("2027-02-28", "2027-03-01", "in 1 day"),
+        ("2100-02-28", "2100-03-01", "in 1 day"),
+        ("2400-02-28", "2400-03-01", "in 2 days"),
+        ("2026-01-31", "2026-03-02", "in 30 days"),
+        ("1999-12-31", "1999-12-31", "today"),
+    ] {
+        Project::from_fixture("npm-basic")
+            .with_policy(&format!(
+                "{DENY_MIT}{}",
+                waiver_expiring(&format!("\"{expires}\""))
+            ))
+            .with_env("LICGUARD_TODAY", today)
+            .check()
+            .code(1)
+            .stdout(predicate::str::contains(format!(
+                "warning: waiver for ms expires {days} ({expires})\n"
+            )));
+    }
+}
+
+#[test]
+fn check_json_reports_waiver_warnings_with_their_expiry_date() {
+    let project = Project::from_fixture("npm-basic").with_policy(&format!(
+        "{DENY_ISC}{}{}{}",
+        waiver("once", Some("1.4.0"), "ISC").replace("2027-01-01", "2026-06-02"),
+        waiver("wrappy", None, "ISC").replace("2027-01-01", "2026-05-01"),
+        waiver("left-pad", None, "MIT"),
+    ));
+    let json = stdout_json(project.check_with(&["--format", "json"]).code(1));
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([
+            {
+                "kind": "unmatched_waiver",
+                "message": "waiver for left-pad matches no Package",
+                "package": "left-pad",
+                "version": null,
+                "expires": "2027-01-01",
+            },
+            {
+                "kind": "expired_waiver",
+                "message": "waiver for wrappy expired on 2026-05-01",
+                "package": "wrappy",
+                "version": null,
+                "expires": "2026-05-01",
+            },
+            {
+                "kind": "expiring_waiver",
+                "message": "waiver for once@1.4.0 expires in 1 day (2026-06-02)",
+                "package": "once",
+                "version": "1.4.0",
+                "expires": "2026-06-02",
+                "days": 1,
+            },
+        ])
+    );
+    let wrappy = json["violations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "wrappy")
+        .unwrap();
+    assert_eq!(wrappy["verdict"], "deny");
+}
+
+#[test]
+fn today_that_is_not_a_calendar_date_is_a_runtime_error() {
+    for today in ["2026-02-30", "2026-6-1", "tomorrow", ""] {
+        for command in ["check", "list"] {
+            Project::from_fixture("npm-basic")
+                .with_policy(ALLOW_ALL)
+                .with_env("LICGUARD_TODAY", today)
+                .run(command, &[])
+                .code(2)
+                .stdout("")
+                .stderr(predicate::str::contains(format!(
+                    "`LICGUARD_TODAY` `{today}` is not a calendar date written `YYYY-MM-DD`"
+                )))
+                .stderr(predicate::str::contains("hint:"));
+        }
+    }
+}
+
+#[test]
+fn help_documents_how_to_pin_today() {
+    for command in ["check", "list"] {
+        Command::cargo_bin("licguard")
+            .unwrap()
+            .args([command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("LICGUARD_TODAY=YYYY-MM-DD"));
+    }
+}
+
+#[test]
+fn today_is_the_current_date_when_licguard_today_is_not_set() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_MIT}{}", waiver_expiring("\"2000-01-01\"")))
+        .without_env("LICGUARD_TODAY")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "warning: waiver for ms expired on 2000-01-01\n",
+        ));
+}
+
+#[test]
+fn waiver_warnings_never_fail_the_gate_even_in_strict_mode_and_are_sorted_by_kind_then_package() {
+    let expiring_soon = |package| waiver(package, None, "ISC").replace("2027-01-01", "2026-06-05");
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{REVIEW_ISC}{}{}{}{}{}{}",
+            expiring_soon("wrappy"),
+            expiring_soon("once"),
+            // `ms` is allowed anyway, so its expiry changes no Verdict.
+            waiver_expiring("\"2026-05-31\""),
+            waiver("left-pad", Some("1.3.0"), "MIT"),
+            waiver("left-pad", None, "MIT"),
+            clarification("zlib", None, "Zlib"),
+        ))
+        .check_with(&["--strict"])
+        .success()
+        .stdout(predicate::str::contains(
+            "(npm)\n\n\
+             warning: clarification for zlib matches no Package\n\
+             warning: waiver for left-pad matches no Package\n\
+             warning: waiver for left-pad@1.3.0 matches no Package\n\
+             warning: waiver for ms expired on 2026-05-31\n\
+             warning: waiver for once expires in 4 days (2026-06-05)\n\
+             warning: waiver for wrappy expires in 4 days (2026-06-05)\n\n\
+             0 deny · 0 review · 6 allow (2 waived)\n✓ Policy respected\n",
         ));
 }

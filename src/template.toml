@@ -25,6 +25,9 @@ unlisted = "review"
 # Whether `dev` Dependencies, needed only to build and test the Project, are
 # evaluated too. `--include-dev` turns it on for one run.
 include_dev = false
+# How many days before a Waiver expires `check` starts warning about it, so
+# there is time to renew or remove it. An expired Waiver no longer applies.
+waiver_expiry_warning_days = 30
 
 # License clarifications assert the real license of a Package whose declared
 # license is missing or wrong, with evidence. The Policy then evaluates that
