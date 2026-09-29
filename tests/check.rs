@@ -1840,6 +1840,20 @@ fn waiver_expiry_date_that_is_not_a_calendar_date_is_a_runtime_error() {
 }
 
 #[test]
+fn waiver_expiry_date_in_another_iso_8601_form_is_a_runtime_error() {
+    for expires in ["\"20270101\"", "\"+002027-01-01\"", "\"2027-01-01T00:00\""] {
+        Project::from_fixture("npm-basic")
+            .with_policy(&format!("{ALLOW_ALL}{}", waiver_expiring(expires)))
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "waiver #1 (`ms`): `expires` {} is not a calendar date written `YYYY-MM-DD`",
+                expires.replace('"', "`")
+            )));
+    }
+}
+
+#[test]
 fn waiver_expiry_date_is_a_string_or_a_toml_local_date() {
     for expires in [
         "\"2027-12-31\"",
