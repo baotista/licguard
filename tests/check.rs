@@ -371,7 +371,7 @@ fn missing_lockfile_is_a_runtime_error() {
         .check()
         .code(2)
         .stderr(predicate::str::contains(
-            "no package-lock.json or yarn.lock found under",
+            "no package-lock.json, yarn.lock or pnpm-lock.yaml found under",
         ))
         .stderr(predicate::str::contains("hint:"));
 }
@@ -2389,6 +2389,410 @@ fn yarn_lockfile_is_aggregated_with_the_other_inventory_sources() {
         ));
 }
 
+/// `pnpm-v9` and `pnpm-v6` are the same real pnpm Project, installed with
+/// pnpm 9 (`lockfileVersion: '9.0'`) and pnpm 8 (`'6.0'`), their
+/// `node_modules` trimmed to the `package.json` files: the root `app`
+/// depends on `debug@4.3.4` (which pulls a nested `ms@2.1.2`), `ms`, `once`
+/// (which pulls `wrappy`), `supports-color` (which pulls `has-flag`, and is
+/// an optional peer of `debug`, hence `debug@4.3.4(supports-color@7.2.0)`)
+/// and the Workspace member `ui`, with the dev Dependency `@types/ms`; `ui`
+/// (`packages/ui`) depends on `debug` and `inherits`, with the dev
+/// Dependency `wrappy`.
+const PNPM_FIXTURES: [&str; 2] = ["pnpm-v9", "pnpm-v6"];
+
+#[test]
+fn pnpm_lockfile_is_an_inventory_source_with_workspace_members_as_roots() {
+    for fixture in PNPM_FIXTURES {
+        let lines = verdict_lines(
+            Project::from_fixture(fixture)
+                .with_policy(DENY_ALL)
+                .check()
+                .code(1),
+        );
+        assert_eq!(
+            lines,
+            [
+                "DENY    MIT             debug@4.3.4  via app > debug",
+                "DENY    MIT             has-flag@4.0.0  via app > supports-color > has-flag",
+                "DENY    ISC             inherits@2.0.4  via ui > inherits",
+                "DENY    MIT             ms@2.1.2  via app > debug > ms",
+                "DENY    MIT             ms@2.1.3  via app > ms",
+                "DENY    ISC             once@1.4.0  via app > once",
+                "DENY    MIT             supports-color@7.2.0  via app > supports-color",
+                // `ui > wrappy` is shorter, but `dev`.
+                "DENY    ISC             wrappy@1.0.2  via app > once > wrappy",
+            ],
+            "{fixture}"
+        );
+    }
+}
+
+#[test]
+fn pnpm_dependency_reached_only_through_dev_dependencies_is_dev() {
+    for fixture in PNPM_FIXTURES {
+        let project = Project::from_fixture(fixture).with_policy(DENY_ALL);
+        project
+            .check()
+            .code(1)
+            .stdout(predicate::str::contains("8 packages (npm)"))
+            .stdout(predicate::str::contains("@types/ms").not());
+        let json = stdout_json(
+            project
+                .list_with(&["--format", "json", "--include-dev"])
+                .success(),
+        );
+        assert_eq!(json["packages"].as_array().unwrap().len(), 9, "{fixture}");
+        let types = json_package(&json["packages"], "@types/ms", "0.7.34");
+        assert_eq!(types["scope"], "dev", "{fixture}");
+        assert_eq!(
+            types["introduction_path"],
+            serde_json::json!(["app", "@types/ms"]),
+            "{fixture}"
+        );
+        // Also a dev Dependency of `ui`, but reached through `app > once`.
+        let wrappy = json_package(&json["packages"], "wrappy", "1.0.2");
+        assert_eq!(wrappy["scope"], "prod", "{fixture}");
+    }
+}
+
+#[test]
+fn pnpm_package_takes_its_license_from_its_installed_copy_in_the_virtual_store() {
+    for fixture in PNPM_FIXTURES {
+        let json = stdout_json(
+            Project::from_fixture(fixture)
+                .with_policy(DENY_ALL)
+                .replace_in(
+                    "node_modules/.pnpm/once@1.4.0/node_modules/once/package.json",
+                    r#""version": "1.4.0""#,
+                    r#""version": "1.3.3""#,
+                )
+                .remove("node_modules/.pnpm/wrappy@1.0.2")
+                .list_with(&["--format", "json", "--include-dev"])
+                .success(),
+        );
+        for (name, version) in [("once", "1.4.0"), ("wrappy", "1.0.2")] {
+            let package = json_package(&json["packages"], name, version);
+            assert_eq!(
+                package["declared_license"],
+                serde_json::Value::Null,
+                "{fixture}"
+            );
+            assert_eq!(package["reason"], "unresolved", "{fixture}");
+            assert_eq!(package["origin"], serde_json::Value::Null, "{fixture}");
+        }
+        // A scoped Package, and one installed with its peers.
+        for (name, version) in [("@types/ms", "0.7.34"), ("debug", "4.3.4")] {
+            let package = json_package(&json["packages"], name, version);
+            assert_eq!(package["declared_license"], "MIT", "{fixture}");
+            assert_eq!(package["origin"], "installed", "{fixture}");
+        }
+    }
+}
+
+/// The `pnpm-lock.yaml` pnpm 8 writes for a Project without workspaces: its
+/// root dependencies are at the top level, not under `importers`.
+const PNPM_V6_SINGLE_PROJECT_LOCKFILE: &str = "lockfileVersion: '6.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+dependencies:
+  once:
+    specifier: ^1.4.0
+    version: 1.4.0
+
+devDependencies:
+  '@types/ms':
+    specifier: ^0.7.34
+    version: 0.7.34
+
+packages:
+
+  /@types/ms@0.7.34:
+    resolution: {integrity: sha512-nG96G3Wp6acyAgJqGasjODb+acrI7KltPiRxzHPXnP3NgI28bpQDRv53olbqGXbfcgF5aiiHmO3xpwEpS5Ld9g==}
+    dev: true
+
+  /once@1.4.0:
+    resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}
+    dependencies:
+      wrappy: 1.0.2
+    dev: false
+
+  /wrappy@1.0.2:
+    resolution: {integrity: sha512-l4Sp/DRseor9wL6EvV2+TuQn63dMkPjZ/sp9XkghTEbV9KlPS1xUsZ3u7/IQO4wxtcFB4bgpQPRcR3QCvezPcQ==}
+    dev: false
+";
+
+#[test]
+fn pnpm_v6_lockfile_without_workspaces_has_its_root_dependencies_at_the_top_level() {
+    let json = stdout_json(
+        Project::from_fixture("pnpm-v6")
+            .with_policy(DENY_ALL)
+            .remove("pnpm-workspace.yaml")
+            .remove("packages")
+            .write("pnpm-lock.yaml", PNPM_V6_SINGLE_PROJECT_LOCKFILE)
+            .list_with(&["--format", "json", "--include-dev"])
+            .success(),
+    );
+    let paths: Vec<(&str, &serde_json::Value, &str)> = json["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|package| {
+            (
+                package["name"].as_str().unwrap(),
+                &package["introduction_path"],
+                package["scope"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            ("@types/ms", &serde_json::json!(["app", "@types/ms"]), "dev"),
+            ("once", &serde_json::json!(["app", "once"]), "prod"),
+            (
+                "wrappy",
+                &serde_json::json!(["app", "once", "wrappy"]),
+                "prod"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn pnpm_package_resolved_with_different_peers_is_one_package() {
+    let ui_debug = "  packages/ui:\n    dependencies:\n      debug:\n        specifier: 4.3.4\n        version: 4.3.4";
+    for (fixture, entry, before) in [
+        (
+            "pnpm-v9",
+            "  debug@4.3.4:\n    dependencies:\n      ms: 2.1.2\n\n",
+            "  has-flag@4.0.0: {}",
+        ),
+        (
+            "pnpm-v6",
+            "  /debug@4.3.4:\n    dependencies:\n      ms: 2.1.2\n    dev: false\n\n",
+            "  /has-flag@4.0.0:",
+        ),
+    ] {
+        // `ui` gets `debug` without its optional peer `supports-color`.
+        let lines = verdict_lines(
+            Project::from_fixture(fixture)
+                .with_policy(DENY_ALL)
+                .replace_in(
+                    "pnpm-lock.yaml",
+                    &format!("{ui_debug}(supports-color@7.2.0)"),
+                    ui_debug,
+                )
+                .replace_in("pnpm-lock.yaml", before, &format!("{entry}{before}"))
+                .check()
+                .code(1),
+        );
+        let debug: Vec<&String> = lines.iter().filter(|l| l.contains("debug@")).collect();
+        assert_eq!(debug.len(), 1, "{fixture}: {lines:?}");
+        assert_eq!(lines.len(), 8, "{fixture}: {lines:?}");
+    }
+}
+
+#[test]
+fn pnpm_aliased_dependency_is_the_package_it_names() {
+    let ms = "      ms:\n        specifier: ^2.1.3\n        version: ";
+    let alias = "      tiny-ms:\n        specifier: npm:ms@^2.1.3\n        version: ";
+    for (fixture, reference) in [("pnpm-v9", "ms@2.1.3"), ("pnpm-v6", "/ms@2.1.3")] {
+        Project::from_fixture(fixture)
+            .with_policy(DENY_ALL)
+            .replace_in(
+                "pnpm-lock.yaml",
+                &format!("{ms}2.1.3\n"),
+                &format!("{alias}{reference}\n"),
+            )
+            .check()
+            .code(1)
+            .stdout(predicate::str::contains(
+                "DENY    MIT             ms@2.1.3  via app > tiny-ms\n",
+            ));
+    }
+}
+
+#[test]
+fn pnpm_tarball_dependency_takes_its_name_and_version_from_its_entry() {
+    let tarball = "https://example.com/once-1.4.0.tgz";
+    for (fixture, edits) in [
+        (
+            "pnpm-v9",
+            vec![
+                (
+                    "        version: 1.4.0\n",
+                    format!("        version: {tarball}\n"),
+                ),
+                (
+                    "  once@1.4.0:\n",
+                    format!("  'once@{tarball}':\n    version: 1.4.0\n"),
+                ),
+                ("  once@1.4.0:\n", format!("  'once@{tarball}':\n")),
+            ],
+        ),
+        (
+            "pnpm-v6",
+            vec![
+                (
+                    "        version: 1.4.0\n",
+                    "        version: '@example.com/once-1.4.0.tgz'\n".to_string(),
+                ),
+                (
+                    "  /once@1.4.0:\n",
+                    "  '@example.com/once-1.4.0.tgz':\n    name: once\n    version: 1.4.0\n"
+                        .to_string(),
+                ),
+            ],
+        ),
+    ] {
+        let mut project = Project::from_fixture(fixture).with_policy(DENY_ALL);
+        for (from, to) in edits {
+            project = project.replace_in("pnpm-lock.yaml", from, &to);
+        }
+        let lines = verdict_lines(project.check().code(1));
+        assert_eq!(lines.len(), 8, "{fixture}: {lines:?}");
+        for line in [
+            "DENY    ISC             once@1.4.0  via app > once",
+            "DENY    ISC             wrappy@1.0.2  via app > once > wrappy",
+        ] {
+            assert!(lines.contains(&line.to_string()), "{fixture}: {lines:?}");
+        }
+    }
+}
+
+#[test]
+fn pnpm_local_directory_dependency_is_followed_but_is_no_package() {
+    let once = "      once:\n        specifier: ^1.4.0\n        version: 1.4.0\n";
+    let local = "      local:\n        specifier: file:./local\n        version: file:local\n";
+    let directory = "    resolution: {directory: local, type: directory}\n";
+    let wrappy = "    dependencies:\n      wrappy: 1.0.2\n";
+    // As pnpm 9 and pnpm 8 write a `file:./local` dependency.
+    for (fixture, entries) in [
+        (
+            "pnpm-v9",
+            vec![
+                (
+                    "  ms@2.1.2:\n",
+                    format!("  local@file:local:\n{directory}\n"),
+                ),
+                ("  ms@2.1.2: {}", format!("  local@file:local:\n{wrappy}\n")),
+            ],
+        ),
+        (
+            "pnpm-v6",
+            vec![(
+                "  /ms@2.1.2:\n",
+                format!("  file:local:\n{directory}    name: local\n{wrappy}    dev: false\n\n"),
+            )],
+        ),
+    ] {
+        let mut project = Project::from_fixture(fixture)
+            .with_policy(DENY_ALL)
+            .write(
+                "local/package.json",
+                r#"{ "name": "local", "version": "0.1.0" }"#,
+            )
+            .replace_in("pnpm-lock.yaml", once, &format!("{local}{once}"));
+        for (before, entry) in entries {
+            project = project.replace_in("pnpm-lock.yaml", before, &format!("{entry}{before}"));
+        }
+        let lines = verdict_lines(project.check().code(1));
+        assert_eq!(lines.len(), 8, "{fixture}: {lines:?}");
+        assert!(
+            lines.contains(
+                &"DENY    ISC             wrappy@1.0.2  via app > local > wrappy".to_string()
+            ),
+            "{fixture}: {lines:?}"
+        );
+    }
+}
+
+#[test]
+fn pnpm_workspace_member_is_named_after_its_package_json_else_its_directory() {
+    for fixture in PNPM_FIXTURES {
+        for (name, shown) in [(r#""name": "ui-kit","#, "ui-kit"), ("", "ui")] {
+            Project::from_fixture(fixture)
+                .with_policy(DENY_ALL)
+                .replace_in("packages/ui/package.json", r#""name": "ui","#, name)
+                .check()
+                .code(1)
+                .stdout(predicate::str::contains(format!(
+                    "DENY    ISC             inherits@2.0.4  via {shown} > inherits"
+                )));
+        }
+    }
+}
+
+#[test]
+fn pnpm_lockfile_version_other_than_6_or_9_is_rejected_with_a_fix() {
+    // pnpm 7 wrote a number.
+    for (version, shown) in [("5.4", "5.4"), ("'7.0'", "7.0")] {
+        Project::from_fixture("pnpm-v9")
+            .with_policy(DENY_ALL)
+            .replace_in(
+                "pnpm-lock.yaml",
+                "lockfileVersion: '9.0'",
+                &format!("lockfileVersion: {version}"),
+            )
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "pnpm-lock.yaml uses lockfileVersion {shown}, which is not supported"
+            )))
+            .stderr(predicate::str::contains(
+                "hint: regenerate it with pnpm 8 or later",
+            ));
+    }
+}
+
+#[test]
+fn pnpm_lockfile_that_cannot_be_read_is_a_runtime_error() {
+    for contents in [
+        "lockfileVersion: '9.0'\nimporters: [\n",
+        "lockfileVersion: '9.0'\nimporters: 3\n",
+    ] {
+        Project::from_fixture("pnpm-v9")
+            .with_policy(DENY_ALL)
+            .write("pnpm-lock.yaml", contents)
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "pnpm-lock.yaml is not a pnpm lockfile licguard can read",
+            ))
+            .stderr(predicate::str::contains(
+                "hint: regenerate it with `pnpm install`",
+            ));
+    }
+}
+
+#[test]
+fn pnpm_lockfile_is_aggregated_with_the_other_inventory_sources() {
+    Project::from_fixture("pnpm-v9")
+        .with_policy(DENY_GPL)
+        .write("tools/other/package-lock.json", GPL_LOCKFILE)
+        // Neither is an Inventory source.
+        .write("node_modules/.pnpm/pnpm-lock.yaml", "not a lockfile")
+        .write(".cache/pnpm-lock.yaml", "not a lockfile")
+        .list_with(&[])
+        .success()
+        .stdout(format!(
+            "licguard {} — 9 packages (npm)\n\n\
+             ALLOW  MIT           debug@4.3.4           listed  installed  via app > debug                      in pnpm-lock.yaml\n\
+             DENY   GPL-3.0-only  gpl-lib@1.0.0         listed  lockfile   via other > gpl-lib                  in tools/other/package-lock.json\n\
+             ALLOW  MIT           has-flag@4.0.0        listed  installed  via app > supports-color > has-flag  in pnpm-lock.yaml\n\
+             ALLOW  ISC           inherits@2.0.4        listed  installed  via ui > inherits                    in pnpm-lock.yaml\n\
+             ALLOW  MIT           ms@2.1.2              listed  installed  via app > debug > ms                 in pnpm-lock.yaml\n\
+             ALLOW  MIT           ms@2.1.3              listed  installed  via app > ms                         in pnpm-lock.yaml\n\
+             ALLOW  ISC           once@1.4.0            listed  installed  via app > once                       in pnpm-lock.yaml\n\
+             ALLOW  MIT           supports-color@7.2.0  listed  installed  via app > supports-color             in pnpm-lock.yaml\n\
+             ALLOW  ISC           wrappy@1.0.2          listed  installed  via app > once > wrappy              in pnpm-lock.yaml\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
 /// `npm-basic` with one Package per Verdict reason and License origin, under
 /// [`DENY_ISC`]: `debug` is clarified, `ms@2.1.3` is Unresolved, `wrappy` is
 /// not installed.
@@ -2858,7 +3262,7 @@ fn list_exits_2_only_on_a_runtime_error() {
         .code(2)
         .stdout("")
         .stderr(predicate::str::contains(
-            "no package-lock.json or yarn.lock found under",
+            "no package-lock.json, yarn.lock or pnpm-lock.yaml found under",
         ))
         .stderr(predicate::str::contains("hint:"));
 }

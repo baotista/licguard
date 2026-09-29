@@ -1,0 +1,11 @@
+{
+  "name": "ui",
+  "version": "1.0.0",
+  "dependencies": {
+    "debug": "4.3.4",
+    "inherits": "^2.0.4"
+  },
+  "devDependencies": {
+    "wrappy": "^1.0.2"
+  }
+}
