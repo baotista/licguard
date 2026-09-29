@@ -114,13 +114,18 @@ pub struct LicensedPackage {
     pub introduction_path: Option<Vec<String>>,
     /// The Inventory sources the Package was found in, sorted.
     pub sources: Vec<String>,
+    /// The 1-based line of the Package's entry in the first of its
+    /// `sources`: the entry that gave it its Introduction path when there
+    /// are several; `None` when unknown.
+    pub line: Option<usize>,
 }
 
 impl LicensedPackage {
     /// Merges `other`, a later occurrence of the same Package: the Package is
     /// `prod` if any occurrence is, keeps the Introduction path of the first
     /// occurrence with that Scope, and the first Declared license found.
-    /// Within the `same_source`, the shortest path with that Scope wins.
+    /// Within the `same_source`, the shortest path with that Scope wins, and
+    /// the line follows the path.
     fn merge(&mut self, other: LicensedPackage, same_source: bool) {
         for source in other.sources {
             if !self.sources.contains(&source) {
@@ -132,14 +137,19 @@ impl LicensedPackage {
             self.license_origin = other.license_origin;
         }
         let length = |path: &Option<Vec<String>>| path.as_ref().map_or(usize::MAX, Vec::len);
-        if self.scope == Scope::Dev && other.scope == Scope::Prod {
+        let takes_path = if self.scope == Scope::Dev && other.scope == Scope::Prod {
             self.scope = Scope::Prod;
+            true
+        } else {
+            same_source
+                && self.scope == other.scope
+                && length(&other.introduction_path) < length(&self.introduction_path)
+        };
+        if takes_path {
             self.introduction_path = other.introduction_path;
-        } else if same_source
-            && self.scope == other.scope
-            && length(&other.introduction_path) < length(&self.introduction_path)
-        {
-            self.introduction_path = other.introduction_path;
+            if same_source {
+                self.line = other.line;
+            }
         }
     }
 }

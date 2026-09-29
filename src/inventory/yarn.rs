@@ -23,6 +23,8 @@ struct Entry {
     version: String,
     /// Its dependencies of any kind, as `(name, descriptor)` pairs.
     dependencies: Vec<(String, String)>,
+    /// The 1-based line of its header; `None` when unknown.
+    line: Option<usize>,
 }
 
 /// A parsed `yarn.lock`.
@@ -205,6 +207,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             scope,
             introduction_path,
             sources: vec![source.to_string()],
+            line: entry.line,
             package: package.clone(),
         };
         // Several entries can resolve to the same Package, e.g. a patched one.

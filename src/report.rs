@@ -31,45 +31,14 @@ pub fn text(evaluation: &Evaluation, violated: bool) -> String {
         .collect();
     flagged.sort_by(|a, b| (a.verdict, &a.package).cmp(&(b.verdict, &b.package)));
     for e in &flagged {
-        let verdict = match e.verdict {
-            Verdict::Deny => "DENY",
-            Verdict::Review => "REVIEW",
-            Verdict::Allow => unreachable!(),
-        };
-        // An Unresolved license already shows its reason in the license column.
-        let license = e
-            .elected
-            .as_deref()
-            .or(e.license.as_deref())
-            .unwrap_or("(unresolved)");
-        let mut notes = Vec::new();
-        if e.origin == Some(LicenseOrigin::Clarification) {
-            notes.push("clarified".to_string());
-        }
-        if e.reason == Reason::Unlisted {
-            notes.push(e.reason.as_str().to_string());
-        }
-        if let (Some(_), Some(full)) = (&e.elected, &e.license) {
-            notes.push(format!("elected from {full}"));
-        }
-        let via = match &e.introduction_path {
-            Some(path) => format!("  via {}", path.join(" > ")),
-            None => String::new(),
-        };
-        let sources = if evaluation.several_sources() {
-            format!("  in {}", e.sources.join(", "))
-        } else {
-            String::new()
-        };
-        let reason = if notes.is_empty() {
-            String::new()
-        } else {
-            format!("  ({})", notes.join(", "))
-        };
         writeln!(
             out,
-            "{verdict:<7} {license:<15} {}@{}{via}{sources}{reason}",
-            e.package.name, e.package.version
+            "{:<7} {:<15} {}@{}{}",
+            e.verdict.as_str().to_uppercase(),
+            license(e),
+            e.package.name,
+            e.package.version,
+            details(evaluation, e)
         )
         .unwrap();
     }
@@ -83,21 +52,67 @@ pub fn text(evaluation: &Evaluation, violated: bool) -> String {
         out.push('\n');
     }
 
-    let (deny, review, allow) = (
+    writeln!(out, "{}", counts(evaluation)).unwrap();
+    writeln!(out, "{}", outcome(violated)).unwrap();
+    out
+}
+
+/// The license a report shows for a Package: its Elected license, else its
+/// Normalized license. An Unresolved license shows its reason instead.
+pub fn license(e: &Evaluated) -> &str {
+    e.elected
+        .as_deref()
+        .or(e.license.as_deref())
+        .unwrap_or("(unresolved)")
+}
+
+/// What a report says of a Package after its name: `  via` its
+/// Introduction path, `  in` its Inventory sources when the Project has
+/// several, and `  (`its notes`)`.
+pub fn details(evaluation: &Evaluation, e: &Evaluated) -> String {
+    let mut notes = Vec::new();
+    if e.origin == Some(LicenseOrigin::Clarification) {
+        notes.push("clarified".to_string());
+    }
+    if e.reason == Reason::Unlisted {
+        notes.push(e.reason.as_str().to_string());
+    }
+    if let (Some(_), Some(full)) = (&e.elected, &e.license) {
+        notes.push(format!("elected from {full}"));
+    }
+    let mut out = String::new();
+    if let Some(path) = &e.introduction_path {
+        write!(out, "  via {}", path.join(" > ")).unwrap();
+    }
+    if evaluation.several_sources() {
+        write!(out, "  in {}", e.sources.join(", ")).unwrap();
+    }
+    if !notes.is_empty() {
+        write!(out, "  ({})", notes.join(", ")).unwrap();
+    }
+    out
+}
+
+/// The count of each Verdict, e.g. `2 deny · 0 review · 4 allow (1 waived)`.
+pub fn counts(evaluation: &Evaluation) -> String {
+    let mut out = format!(
+        "{} deny · {} review · {} allow",
         evaluation.count(Verdict::Deny),
         evaluation.count(Verdict::Review),
-        evaluation.count(Verdict::Allow),
+        evaluation.count(Verdict::Allow)
     );
     let waived = evaluation.waived();
-    write!(out, "{deny} deny · {review} review · {allow} allow").unwrap();
     if waived > 0 {
         write!(out, " ({waived} waived)").unwrap();
     }
-    out.push('\n');
-    if violated {
-        writeln!(out, "✗ Policy violated (exit 1)").unwrap();
-    } else {
-        writeln!(out, "✓ Policy respected").unwrap();
-    }
     out
+}
+
+/// Whether the gate fails, and its exit code.
+pub fn outcome(violated: bool) -> &'static str {
+    if violated {
+        "✗ Policy violated (exit 1)"
+    } else {
+        "✓ Policy respected"
+    }
 }

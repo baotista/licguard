@@ -1,6 +1,7 @@
 mod clarification;
 mod date;
 mod evaluation;
+mod github;
 mod init;
 mod inventory;
 mod json;
@@ -85,6 +86,7 @@ enum Command {
 enum CheckFormat {
     Text,
     Json,
+    Github,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -121,6 +123,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
             let out = match format {
                 CheckFormat::Text => report::text(&evaluation, violated),
                 CheckFormat::Json => json::check(&evaluation, strict, violated),
+                CheckFormat::Github => {
+                    github::write_summary(&evaluation, strict, violated)?;
+                    github::check(&evaluation, &path, strict, violated)
+                }
             };
             emit(&out, output.as_deref())?;
             Ok(if violated {

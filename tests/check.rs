@@ -130,9 +130,22 @@ impl Project {
 
     /// Runs `licguard <command>` on the Project, with `args` after its path.
     fn run(&self, command: &str, args: &[&str]) -> assert_cmd::assert::Assert {
+        self.run_from(Path::new("."), &self.path(), command, args)
+    }
+
+    /// Runs `licguard <command> <path>` from the directory `cwd`, with `args`
+    /// after `path`, which names the Project from `cwd`.
+    fn run_from(
+        &self,
+        cwd: &Path,
+        path: &Path,
+        command: &str,
+        args: &[&str],
+    ) -> assert_cmd::assert::Assert {
         let mut cmd = Command::cargo_bin("licguard").unwrap();
-        cmd.arg(command)
-            .arg(self.path())
+        cmd.current_dir(cwd)
+            .arg(command)
+            .arg(path)
             .args(args)
             .env("LICGUARD_TODAY", TODAY);
         for (key, value) in &self.env {
@@ -2770,19 +2783,21 @@ fn check_json_violations_honour_strict_mode_and_keep_the_exit_code() {
 
 #[test]
 fn check_output_option_writes_the_report_to_a_file_instead_of_stdout() {
-    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
-    let file = project.path().join("report.json");
-    let expected = project
-        .check_with(&["--format", "json"])
-        .code(1)
-        .get_output()
-        .stdout
-        .clone();
-    project
-        .check_with(&["--format", "json", "--output", file.to_str().unwrap()])
-        .code(1)
-        .stdout("");
-    assert_eq!(fs::read(&file).unwrap(), expected);
+    let project = outside_github_actions(Project::from_fixture("npm-basic").with_policy(DENY_ISC));
+    for format in ["text", "json", "github"] {
+        let file = project.path().join(format!("report.{format}"));
+        let expected = project
+            .check_with(&["--format", format])
+            .code(1)
+            .get_output()
+            .stdout
+            .clone();
+        project
+            .check_with(&["--format", format, "--output", file.to_str().unwrap()])
+            .code(1)
+            .stdout("");
+        assert_eq!(fs::read(&file).unwrap(), expected, "{format}");
+    }
 }
 
 #[test]
@@ -3304,4 +3319,284 @@ fn waiver_warnings_never_fail_the_gate_even_in_strict_mode_and_are_sorted_by_kin
              warning: waiver for wrappy expires in 4 days (2026-06-05)\n\n\
              0 deny · 0 review · 6 allow (2 waived)\n✓ Policy respected\n",
         ));
+}
+
+/// The Project, without the GitHub Actions variables that `check --format
+/// github` reads, so that no test depends on running in GitHub Actions.
+fn outside_github_actions(project: Project) -> Project {
+    project
+        .without_env("GITHUB_WORKSPACE")
+        .without_env("GITHUB_STEP_SUMMARY")
+}
+
+/// The Project in a GitHub Actions workspace: `GITHUB_WORKSPACE` is its
+/// directory, and there is no job summary.
+fn in_github_workspace(project: Project) -> Project {
+    let workspace = project.path().to_str().unwrap().to_string();
+    outside_github_actions(project).with_env("GITHUB_WORKSPACE", &workspace)
+}
+
+/// Runs `check --format github` on the Project, with `args` after it.
+fn check_github(project: &Project, args: &[&str]) -> assert_cmd::assert::Assert {
+    project.check_with(&[&["--format", "github"], args].concat())
+}
+
+#[test]
+fn check_github_emits_an_error_annotation_per_violation_on_its_lockfile_entry() {
+    let project = in_github_workspace(Project::from_fixture("npm-basic").with_policy(DENY_ISC));
+    check_github(&project, &[]).code(1).stdout(
+        "::error file=package-lock.json,line=52,title=licguard%3A DENY ISC once@1.4.0::ISC  via app > once\n\
+         ::error file=package-lock.json,line=61,title=licguard%3A DENY ISC wrappy@1.0.2::ISC  via app > once > wrappy\n\
+         2 deny · 0 review · 4 allow — ✗ Policy violated (exit 1)\n",
+    );
+}
+
+#[test]
+fn check_github_emits_a_warning_annotation_per_warning_on_the_policy_file() {
+    let project = in_github_workspace(Project::from_fixture("npm-basic").with_policy(&format!(
+        "{ALLOW_ALL}{}{}",
+        clarification("left-pad", None, "MIT"),
+        waiver("once", None, "ISC").replace("2027-01-01", "2026-05-31"),
+    )));
+    check_github(&project, &[]).success().stdout(
+        "::warning file=licguard.toml,title=licguard%3A unmatched_clarification::clarification for left-pad matches no Package\n\
+         ::warning file=licguard.toml,title=licguard%3A expired_waiver::waiver for once expired on 2026-05-31\n\
+         0 deny · 0 review · 6 allow — ✓ Policy respected\n",
+    );
+}
+
+/// The 1-based number of the first line of the Project's `file` that starts
+/// with `prefix`, after its indentation.
+fn line_starting_with(project: &Project, file: &str, prefix: &str) -> usize {
+    let text = fs::read_to_string(project.path().join(file)).unwrap();
+    let index = text
+        .lines()
+        .position(|line| line.trim_start().starts_with(prefix))
+        .unwrap_or_else(|| panic!("no line of {file} starts with {prefix}"));
+    index + 1
+}
+
+#[test]
+fn check_github_points_to_the_entry_header_in_a_yarn_lockfile() {
+    for fixture in YARN_FIXTURES {
+        let project = in_github_workspace(Project::from_fixture(fixture).with_policy(DENY_ISC));
+        // Berry quotes its entry headers.
+        let header = if fixture == "yarn-v1" {
+            "once@"
+        } else {
+            "\"once@"
+        };
+        let line = line_starting_with(&project, "yarn.lock", header);
+        check_github(&project, &[])
+            .code(1)
+            .stdout(predicate::str::contains(format!(
+                "::error file=yarn.lock,line={line},title=licguard%3A DENY ISC once@1.4.0::ISC  via app > once\n"
+            )));
+    }
+}
+
+#[test]
+fn check_github_points_to_the_lockfile_entry_that_gives_the_introduction_path() {
+    let project = in_github_workspace(
+        Project::from_fixture("npm-basic")
+            .with_policy(DENY_ISC)
+            .edit_lockfile(|packages| {
+                // `helper@1` is installed under `debug > ms`, first in key
+                // order, and under `once`, the shortest path.
+                let helper = serde_json::json!({ "version": "1.0.0", "license": "ISC" });
+                packages["node_modules/debug/node_modules/ms"]["dependencies"] =
+                    serde_json::json!({ "helper": "1" });
+                packages["node_modules/debug/node_modules/ms/node_modules/helper"] = helper.clone();
+                packages["node_modules/once"]["dependencies"]["helper"] = "1".into();
+                packages["node_modules/once/node_modules/helper"] = helper;
+            }),
+    );
+    let line = line_starting_with(
+        &project,
+        "package-lock.json",
+        "\"node_modules/once/node_modules/helper\":",
+    );
+    check_github(&project, &[])
+        .code(1)
+        .stdout(predicate::str::contains(format!(
+            "::error file=package-lock.json,line={line},title=licguard%3A DENY ISC helper@1.0.0::ISC  via app > once > helper\n"
+        )));
+}
+
+#[test]
+fn check_github_omits_the_line_of_an_entry_in_a_minified_lockfile() {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    let path = project.path().join("package-lock.json");
+    let lockfile: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    fs::write(&path, lockfile.to_string()).unwrap();
+    check_github(&in_github_workspace(project), &[])
+        .code(1)
+        .stdout(predicate::str::starts_with(
+            "::error file=package-lock.json,title=licguard%3A DENY ISC once@1.4.0::",
+        ));
+}
+
+#[test]
+fn check_github_points_to_the_first_inventory_source_of_a_package_and_names_them_all() {
+    let project = in_github_workspace(
+        Project::from_fixture("npm-workspaces").with_policy("[policy]\ndeny = [\"ISC\"]\n"),
+    );
+    let inherits = line_starting_with(&project, SCRIPTS_LOCKFILE, "\"node_modules/inherits\":");
+    let once = line_starting_with(&project, "package-lock.json", "\"node_modules/once\":");
+    check_github(&project, &[])
+        .code(1)
+        .stdout(predicate::str::contains(format!(
+            "::error file=tools/scripts/package-lock.json,line={inherits},title=licguard%3A DENY ISC inherits@2.0.4::ISC  via scripts > inherits  in tools/scripts/package-lock.json\n\
+             ::error file=package-lock.json,line={once},title=licguard%3A DENY ISC once@1.4.0::ISC  via web > once  in package-lock.json, tools/scripts/package-lock.json\n"
+        )));
+}
+
+#[test]
+fn check_github_escapes_messages_and_properties() {
+    let project = in_github_workspace(
+        Project::from_fixture("npm-basic")
+            .with_policy(&format!(
+                "[policy]\nallow = [\"MIT\"]\ndeny = [\"ISC\", \"GPL-3.0-only\"]\n{}",
+                clarification("left%\\r\\npad", None, "MIT"),
+            ))
+            .write("a,b%/package-lock.json", GPL_LOCKFILE)
+            .edit_lockfile(|packages| {
+                packages["node_modules/once"]["version"] = "1.4.0-a,b:c%d\r\ne".into();
+            }),
+    );
+    check_github(&project, &[])
+        .code(1)
+        .stdout(predicate::str::contains(
+            "::error file=a%2Cb%25/package-lock.json,line=6,title=licguard%3A DENY GPL-3.0-only gpl-lib@1.0.0::GPL-3.0-only  via other > gpl-lib  in a,b%25/package-lock.json\n",
+        ))
+        .stdout(predicate::str::contains(
+            ",title=licguard%3A DENY ISC once@1.4.0-a%2Cb%3Ac%25d%0D%0Ae::ISC  via app > once  in package-lock.json\n",
+        ))
+        .stdout(predicate::str::contains(
+            "::clarification for left%25%0D%0Apad matches no Package\n",
+        ));
+}
+
+#[test]
+fn check_github_annotates_reviews_only_in_strict_mode_with_the_text_format_exit_code() {
+    let project = in_github_workspace(Project::from_fixture("npm-basic").with_policy(REVIEW_ISC));
+    check_github(&project, &[])
+        .success()
+        .stdout("0 deny · 2 review · 4 allow — ✓ Policy respected\n");
+    check_github(&project, &["--strict"])
+        .code(1)
+        .stdout(predicate::str::starts_with(
+            "::error file=package-lock.json,line=52,title=licguard%3A REVIEW ISC once@1.4.0::ISC  via app > once\n",
+        ))
+        .stdout(predicate::str::ends_with(
+            "0 deny · 2 review · 4 allow — ✗ Policy violated (exit 1)\n",
+        ));
+}
+
+#[test]
+fn check_github_names_files_from_the_current_directory_or_the_github_workspace() {
+    let project = outside_github_actions(Project::from_fixture("npm-basic").with_policy(DENY_ISC));
+    let dir = project.path();
+    let (parent, name) = (dir.parent().unwrap(), dir.file_name().unwrap());
+    let name = name.to_str().unwrap();
+    let args = ["--format", "github"];
+    let annotation = |file: &str| {
+        predicate::str::starts_with(format!(
+            "::error file={file},line=52,title=licguard%3A DENY ISC once@1.4.0::"
+        ))
+    };
+
+    // A relative Project path is kept, since GitHub Actions runs steps from
+    // the workspace.
+    project
+        .run_from(&dir, Path::new("."), "check", &args)
+        .code(1)
+        .stdout(annotation("package-lock.json"));
+    project
+        .run_from(parent, Path::new(name), "check", &args)
+        .code(1)
+        .stdout(annotation(&format!("{name}/package-lock.json")));
+    let project = project.with_env("GITHUB_WORKSPACE", parent.to_str().unwrap());
+    project
+        .run_from(&dir, Path::new("."), "check", &args)
+        .code(1)
+        .stdout(annotation("package-lock.json"));
+
+    // An absolute one is relative to the workspace when it is under it.
+    check_github(&project, &[])
+        .code(1)
+        .stdout(annotation(&format!("{name}/package-lock.json")));
+    let project = project.with_env("GITHUB_WORKSPACE", dir.join("elsewhere").to_str().unwrap());
+    let absolute = dir
+        .join("package-lock.json")
+        .to_str()
+        .unwrap()
+        .replace('\\', "/")
+        .replace(':', "%3A");
+    check_github(&project, &[])
+        .code(1)
+        .stdout(annotation(&absolute));
+}
+
+#[test]
+fn check_github_appends_violations_and_warnings_to_the_job_summary() {
+    let project = in_github_workspace(Project::from_fixture("npm-basic").with_policy(&format!(
+        "{DENY_ISC}{}",
+        clarification("left-pad", None, "MIT"),
+    )))
+    .write("summary.md", "Previous step\n");
+    let summary = project.path().join("summary.md");
+    let project = project.with_env("GITHUB_STEP_SUMMARY", summary.to_str().unwrap());
+    check_github(&project, &[])
+        .code(1)
+        .stdout(predicate::str::ends_with(
+            "::warning file=licguard.toml,title=licguard%3A unmatched_clarification::clarification for left-pad matches no Package\n\
+             2 deny · 0 review · 4 allow — ✗ Policy violated (exit 1)\n",
+        ));
+    assert_eq!(
+        fs::read_to_string(&summary).unwrap(),
+        "Previous step\n\
+         ## licguard\n\
+         \n\
+         2 deny · 0 review · 4 allow — ✗ Policy violated (exit 1)\n\
+         \n\
+         | Verdict | License | Package | Via |\n\
+         | --- | --- | --- | --- |\n\
+         | DENY | `ISC` | `once@1.4.0` | app > once |\n\
+         | DENY | `ISC` | `wrappy@1.0.2` | app > once > wrappy |\n\
+         \n\
+         ### Warnings\n\
+         \n\
+         - clarification for left-pad matches no Package\n"
+    );
+}
+
+#[test]
+fn check_github_job_summary_says_when_there_is_no_violation() {
+    let project = in_github_workspace(Project::from_fixture("npm-basic").with_policy(REVIEW_ISC));
+    let summary = project.path().join("summary.md");
+    let project = project.with_env("GITHUB_STEP_SUMMARY", summary.to_str().unwrap());
+    check_github(&project, &[]).success();
+    assert_eq!(
+        fs::read_to_string(&summary).unwrap(),
+        "## licguard\n\
+         \n\
+         0 deny · 2 review · 4 allow — ✓ Policy respected\n\
+         \n\
+         No Violation.\n"
+    );
+}
+
+#[test]
+fn unwritable_job_summary_is_a_runtime_error() {
+    let project = in_github_workspace(Project::from_fixture("npm-basic").with_policy(ALLOW_ALL));
+    let summary = project.path().join("missing").join("summary.md");
+    let project = project.with_env("GITHUB_STEP_SUMMARY", summary.to_str().unwrap());
+    check_github(&project, &[])
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::contains("cannot write the job summary"))
+        .stderr(predicate::str::contains("summary.md"))
+        .stderr(predicate::str::contains("hint:"));
 }

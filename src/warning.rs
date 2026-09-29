@@ -35,6 +35,18 @@ pub enum Warning {
     },
 }
 
+impl Warning {
+    /// The identifier of the Warning's kind, e.g. `expired_waiver`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Warning::UnmatchedClarification { .. } => "unmatched_clarification",
+            Warning::UnmatchedWaiver { .. } => "unmatched_waiver",
+            Warning::ExpiredWaiver { .. } => "expired_waiver",
+            Warning::ExpiringWaiver { .. } => "expiring_waiver",
+        }
+    }
+}
+
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
