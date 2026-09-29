@@ -3716,6 +3716,30 @@ fn today_is_the_current_date_when_licguard_today_is_not_set() {
 }
 
 #[test]
+fn today_is_the_local_date_when_licguard_today_is_not_set() {
+    // Kiritimati (UTC+14) and Pago Pago (UTC-11) are 25 hours apart, so their
+    // local dates always differ, whatever the time of day.
+    let days_until_expiry_in = |time_zone| {
+        let project = Project::from_fixture("npm-basic")
+            .with_policy(&format!(
+                "[policy]\nallow = [\"ISC\"]\ndeny = [\"MIT\"]\nwaiver_expiry_warning_days = 1000000\n{}",
+                waiver_expiring("\"2999-12-31\"")
+            ))
+            .without_env("LICGUARD_TODAY")
+            .with_env("TZ", time_zone);
+        let json = stdout_json(project.check_with(&["--format", "json"]).code(1));
+        assert_eq!(json["warnings"][0]["kind"], "expiring_waiver");
+        json["warnings"][0]["days"].as_i64().unwrap()
+    };
+    let ahead = days_until_expiry_in("Pacific/Kiritimati");
+    let behind = days_until_expiry_in("Pacific/Pago_Pago");
+    assert!(
+        behind - ahead >= 1,
+        "{behind} days from Pago Pago is not more than {ahead} days from Kiritimati"
+    );
+}
+
+#[test]
 fn waiver_warnings_never_fail_the_gate_even_in_strict_mode_and_are_sorted_by_kind_then_package() {
     let expiring_soon = |package| waiver(package, None, "ISC").replace("2027-01-01", "2026-06-05");
     Project::from_fixture("npm-basic")

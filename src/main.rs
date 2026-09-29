@@ -30,7 +30,7 @@ struct Cli {
 }
 
 /// The help text of the commands that evaluate Waivers.
-const TODAY_HELP: &str = "Waiver expiry is evaluated as of today (UTC); set LICGUARD_TODAY=YYYY-MM-DD to evaluate it as of another date, e.g. to re-run an old CI job.";
+const TODAY_HELP: &str = "Waiver expiry is evaluated as of today (local date); set LICGUARD_TODAY=YYYY-MM-DD to evaluate it as of another date, e.g. to re-run an old CI job.";
 
 #[derive(Subcommand)]
 enum Command {
