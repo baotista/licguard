@@ -9,6 +9,8 @@ pub struct Evaluated {
     pub license: Option<String>,
     pub verdict: Verdict,
     pub reason: Reason,
+    /// See [`crate::policy::Outcome::elected`].
+    pub elected: Option<String>,
 }
 
 /// Renders the terminal report. Expects `evaluated` already sorted.
@@ -38,10 +40,22 @@ pub fn text(evaluated: &[Evaluated], violated: bool) -> String {
             Verdict::Allow => unreachable!(),
         };
         // An Unresolved license already shows its reason in the license column.
-        let license = e.license.as_deref().unwrap_or("(unresolved)");
-        let reason = match e.reason {
-            Reason::Unlisted => "  (unlisted)",
-            Reason::Listed | Reason::Unresolved => "",
+        let license = e
+            .elected
+            .as_deref()
+            .or(e.license.as_deref())
+            .unwrap_or("(unresolved)");
+        let mut notes = Vec::new();
+        if e.reason == Reason::Unlisted {
+            notes.push("unlisted".to_string());
+        }
+        if let (Some(_), Some(full)) = (&e.elected, &e.license) {
+            notes.push(format!("elected from {full}"));
+        }
+        let reason = if notes.is_empty() {
+            String::new()
+        } else {
+            format!("  ({})", notes.join(", "))
         };
         writeln!(
             out,

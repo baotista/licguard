@@ -50,10 +50,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .into_iter()
                 .map(|p| {
                     let license = p.declared_license.as_deref().and_then(policy::normalize);
-                    let (verdict, reason) = policy.evaluate(license.as_deref());
+                    let outcome = policy.evaluate(license.as_deref());
                     Evaluated {
-                        verdict,
-                        reason,
+                        verdict: outcome.verdict,
+                        reason: outcome.reason,
+                        elected: outcome.elected,
                         license,
                         package: p.package,
                     }
