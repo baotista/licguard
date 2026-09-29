@@ -1,8 +1,11 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
+use spdx::expression::{ExprNode, Operator};
+use spdx::{LicenseItem, LicenseReq};
 
 const CONFIG: &str = "licguard.toml";
 
@@ -21,6 +24,15 @@ pub enum Reason {
     Listed,
     Unresolved,
     Unlisted,
+}
+
+/// The result of evaluating one Package's license against the Policy.
+pub struct Outcome {
+    pub verdict: Verdict,
+    pub reason: Reason,
+    /// The license the Verdict is based on, with each `OR` replaced by its
+    /// Elected license; `None` when the license has no `OR`.
+    pub elected: Option<String>,
 }
 
 impl Verdict {
@@ -75,46 +87,145 @@ impl Policy {
         let config: Config =
             toml::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
         let policy = config.policy;
-        for id in policy
-            .allow
-            .iter()
-            .chain(&policy.review)
-            .chain(&policy.deny)
-        {
-            if spdx_id(id).is_none() {
-                bail!(
-                    "{}: `{id}` is not an SPDX license identifier\nhint: see https://spdx.org/licenses/",
-                    path.display()
-                );
+        let lists = [
+            ("allow", &policy.allow),
+            ("review", &policy.review),
+            ("deny", &policy.deny),
+        ];
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for (list, entries) in lists {
+            for id in entries {
+                if !is_policy_entry(id) {
+                    bail!(
+                        "{}: `{id}` is not an SPDX license identifier, optionally followed by `WITH <exception>`\nhint: see https://spdx.org/licenses/",
+                        path.display()
+                    );
+                }
+                if let Some(first) = seen.insert(id, list).filter(|first| *first != list) {
+                    bail!(
+                        "{}: `{id}` is in both `{first}` and `{list}`\nhint: keep it in exactly one list",
+                        path.display()
+                    );
+                }
             }
         }
         Ok(policy)
     }
 
-    /// Verdict for a Normalized license; `None` means the license is Unresolved.
-    pub fn evaluate(&self, license: Option<&str>) -> (Verdict, Reason) {
-        let listed = |list: &[String], id| list.iter().any(|l| l == id);
-        match license {
-            None => (self.unresolved, Reason::Unresolved),
-            Some(id) if listed(&self.deny, id) => (Verdict::Deny, Reason::Listed),
-            Some(id) if listed(&self.review, id) => (Verdict::Review, Reason::Listed),
-            Some(id) if listed(&self.allow, id) => (Verdict::Allow, Reason::Listed),
-            Some(_) => (self.unlisted, Reason::Unlisted),
+    /// Evaluates a Normalized license; `None` means the license is Unresolved.
+    pub fn evaluate(&self, license: Option<&str>) -> Outcome {
+        let Some(license) = license else {
+            return Outcome {
+                verdict: self.unresolved,
+                reason: Reason::Unresolved,
+                elected: None,
+            };
+        };
+        let expression =
+            spdx::Expression::parse(license).expect("a Normalized license is a valid expression");
+        // The expression comes in postfix order: evaluate it with a stack of
+        // (verdict, reason, license with each `OR` replaced by its elected option).
+        let mut stack: Vec<(Verdict, Reason, String)> = Vec::new();
+        let mut has_or = false;
+        for node in expression.iter() {
+            match node {
+                ExprNode::Req(req) => {
+                    let (verdict, reason) = self.evaluate_term(&req.req);
+                    stack.push((verdict, reason, req.req.to_string()));
+                }
+                ExprNode::Op(Operator::Or) => {
+                    has_or = true;
+                    let right = stack.pop().unwrap();
+                    let left = stack.pop().unwrap();
+                    // Most favorable option wins; the first one on ties.
+                    stack.push(if right.0 > left.0 { right } else { left });
+                }
+                ExprNode::Op(Operator::And) => {
+                    let right = stack.pop().unwrap();
+                    let left = stack.pop().unwrap();
+                    // Most severe term wins; the first one on ties.
+                    let (verdict, reason) = if right.0 < left.0 {
+                        (right.0, right.1)
+                    } else {
+                        (left.0, left.1)
+                    };
+                    stack.push((verdict, reason, format!("{} AND {}", left.2, right.2)));
+                }
+            }
+        }
+        let (verdict, reason, elected) = stack.pop().unwrap();
+        Outcome {
+            verdict,
+            reason,
+            elected: has_or.then_some(elected),
+        }
+    }
+
+    /// Evaluates a single license term. A term that is not listed falls back
+    /// to its base license: without its SPDX exception, then without
+    /// `-or-later`. Both only add permissions, so the base license's Verdict
+    /// is a safe bound.
+    fn evaluate_term(&self, term: &LicenseReq) -> (Verdict, Reason) {
+        let license = term.to_string();
+        let listed = |list: &[String]| list.contains(&license);
+        if listed(&self.deny) {
+            (Verdict::Deny, Reason::Listed)
+        } else if listed(&self.review) {
+            (Verdict::Review, Reason::Listed)
+        } else if listed(&self.allow) {
+            (Verdict::Allow, Reason::Listed)
+        } else if term.addition.is_some() {
+            self.evaluate_term(&LicenseReq {
+                license: term.license.clone(),
+                addition: None,
+            })
+        } else if let Some(base) = base_version(&term.license) {
+            self.evaluate_term(&LicenseReq {
+                license: base,
+                addition: None,
+            })
+        } else {
+            (self.unlisted, Reason::Unlisted)
         }
     }
 }
 
-/// Normalizes a Declared license. Only plain SPDX license identifiers are
-/// understood for now; anything else is Unresolved.
+/// Normalizes a Declared license into an SPDX expression; `None` when it is
+/// not a valid one.
 pub fn normalize(declared: &str) -> Option<String> {
-    spdx_id(declared.trim()).map(str::to_string)
+    let declared = declared.trim();
+    spdx::Expression::parse(declared)
+        .ok()
+        .map(|_| declared.to_string())
 }
 
-/// The canonical SPDX license identifier equal to `id`, if any.
-/// `spdx::license_id` silently drops a trailing `+`, which would turn
-/// `GPL-2.0+` into `GPL-2.0`; an exact match is required instead.
-fn spdx_id(id: &str) -> Option<&'static str> {
-    spdx::license_id(id)
-        .map(|license| license.name)
-        .filter(|name| *name == id)
+/// `GPL-2.0-or-later` -> `GPL-2.0-only`; `Apache-2.0+` -> `Apache-2.0`.
+fn base_version(license: &LicenseItem) -> Option<LicenseItem> {
+    let LicenseItem::Spdx { id, or_later } = license else {
+        return None;
+    };
+    if *or_later {
+        return Some(LicenseItem::Spdx {
+            id: *id,
+            or_later: false,
+        });
+    }
+    let base = id.name.strip_suffix("-or-later")?;
+    spdx::gnu_license_id(base, false).map(|id| LicenseItem::Spdx {
+        id,
+        or_later: false,
+    })
+}
+
+/// A policy entry is a single license term (`MIT`, `Apache-2.0+`,
+/// `GPL-2.0-only WITH Classpath-exception-2.0`) written in canonical form.
+fn is_policy_entry(entry: &str) -> bool {
+    let Ok(expression) = spdx::Expression::parse(entry) else {
+        return false;
+    };
+    let mut nodes = expression.iter();
+    matches!(
+        (nodes.next(), nodes.next()),
+        (Some(ExprNode::Req(req)), None) if req.req.to_string() == entry
+    )
 }

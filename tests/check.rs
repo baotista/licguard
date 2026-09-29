@@ -63,6 +63,15 @@ impl Project {
         self
     }
 
+    /// Sets the Declared license of the installed `ms@2.1.3`.
+    fn declare_ms_license(self, expression: &str) -> Self {
+        self.replace_in(
+            "node_modules/ms/package.json",
+            r#""license": "MIT""#,
+            &format!(r#""license": "{expression}""#),
+        )
+    }
+
     fn check(&self) -> assert_cmd::assert::Assert {
         self.check_with(&[])
     }
@@ -353,20 +362,6 @@ fn or_later_suffix_in_policy_is_rejected_until_expressions_are_supported() {
         ));
 }
 
-#[test]
-fn declared_license_with_or_later_suffix_is_unresolved_until_expressions_are_supported() {
-    Project::from_fixture("npm-basic")
-        .with_policy(ALLOW_ALL)
-        .replace_in(
-            "node_modules/ms/package.json",
-            r#""license": "MIT""#,
-            r#""license": "MIT+""#,
-        )
-        .check()
-        .code(1)
-        .stdout(predicate::str::contains("DENY    (unresolved)    ms@2.1.3"));
-}
-
 const REVIEW_ISC: &str = r#"
     [policy]
     allow = ["MIT"]
@@ -464,4 +459,188 @@ fn invalid_verdict_setting_is_a_runtime_error() {
         .stderr(predicate::str::contains("allow"))
         .stderr(predicate::str::contains("review"))
         .stderr(predicate::str::contains("deny"));
+}
+
+#[test]
+fn or_expression_takes_the_most_favorable_verdict() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["GPL-3.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL-3.0-only OR MIT")
+        .check()
+        .success()
+        .stdout(predicate::str::contains("6 allow"));
+}
+
+#[test]
+fn and_expression_takes_the_most_severe_verdict() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["GPL-3.0-only"]
+            "#,
+        )
+        .declare_ms_license("MIT AND GPL-3.0-only")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT AND GPL-3.0-only ms@2.1.3",
+        ));
+}
+
+#[test]
+fn elected_license_of_an_or_expression_is_shown() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            review = ["MPL-2.0"]
+            deny = ["GPL-3.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL-3.0-only OR MPL-2.0")
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  MPL-2.0         ms@2.1.3  (elected from GPL-3.0-only OR MPL-2.0)\n",
+        ));
+}
+
+#[test]
+fn or_expression_elects_the_first_option_on_ties() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            review = ["MPL-2.0", "EPL-2.0"]
+            "#,
+        )
+        .declare_ms_license("EPL-2.0 OR MPL-2.0")
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  EPL-2.0         ms@2.1.3  (elected from EPL-2.0 OR MPL-2.0)\n",
+        ));
+}
+
+#[test]
+fn with_expression_listed_in_full_uses_that_entry() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC", "GPL-2.0-only WITH Classpath-exception-2.0"]
+            deny = ["GPL-2.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL-2.0-only WITH Classpath-exception-2.0")
+        .check()
+        .success()
+        .stdout(predicate::str::contains("6 allow"));
+}
+
+#[test]
+fn with_expression_not_listed_takes_the_base_license_verdict() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["GPL-2.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL-2.0-only WITH Classpath-exception-2.0")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    GPL-2.0-only WITH Classpath-exception-2.0 ms@2.1.3\n",
+        ));
+}
+
+#[test]
+fn gnu_or_later_license_takes_its_base_version_verdict() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["GPL-2.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL-2.0-or-later")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    GPL-2.0-or-later ms@2.1.3\n",
+        ));
+}
+
+#[test]
+fn plus_or_later_license_takes_its_base_version_verdict() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["Apache-2.0"]
+            "#,
+        )
+        .declare_ms_license("Apache-2.0+")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    Apache-2.0+     ms@2.1.3\n",
+        ));
+}
+
+#[test]
+fn or_later_license_listed_explicitly_uses_that_entry() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC", "GPL-2.0-or-later"]
+            deny = ["GPL-2.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL-2.0-or-later")
+        .check()
+        .success();
+}
+
+#[test]
+fn license_in_two_lists_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "MPL-2.0"]
+            review = ["MPL-2.0"]
+            "#,
+        )
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "`MPL-2.0` is in both `allow` and `review`",
+        ));
+}
+
+#[test]
+fn compound_expression_in_policy_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy("[policy]\nallow = [\"MIT OR ISC\"]\n")
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "`MIT OR ISC` is not an SPDX license identifier, optionally followed by `WITH <exception>`",
+        ));
 }
