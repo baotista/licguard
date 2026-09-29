@@ -21,9 +21,22 @@ impl std::fmt::Display for Ecosystem {
     }
 }
 
-/// A Package together with its Declared license, if one was found.
+/// A Package together with its Declared license, if one was found, and how
+/// the Project uses it.
 #[derive(Debug)]
 pub struct LicensedPackage {
     pub package: Package,
     pub declared_license: Option<String>,
+    pub scope: Scope,
+    /// Package names from the Project root to this Package; `None` when it is
+    /// not reachable from the root.
+    pub introduction_path: Option<Vec<String>>,
+}
+
+/// Whether a Dependency is needed by what the Project ships (`Prod`) or only
+/// to build and test it (`Dev`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Prod,
+    Dev,
 }

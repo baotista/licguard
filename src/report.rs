@@ -11,6 +11,8 @@ pub struct Evaluated {
     pub reason: Reason,
     /// See [`crate::policy::Outcome::elected`].
     pub elected: Option<String>,
+    /// See [`crate::inventory::LicensedPackage::introduction_path`].
+    pub introduction_path: Option<Vec<String>>,
 }
 
 /// Renders the terminal report. Expects `evaluated` already sorted.
@@ -52,6 +54,10 @@ pub fn text(evaluated: &[Evaluated], violated: bool) -> String {
         if let (Some(_), Some(full)) = (&e.elected, &e.license) {
             notes.push(format!("elected from {full}"));
         }
+        let via = match &e.introduction_path {
+            Some(path) => format!("  via {}", path.join(" > ")),
+            None => String::new(),
+        };
         let reason = if notes.is_empty() {
             String::new()
         } else {
@@ -59,7 +65,7 @@ pub fn text(evaluated: &[Evaluated], violated: bool) -> String {
         };
         writeln!(
             out,
-            "{verdict:<7} {license:<15} {}@{}{reason}",
+            "{verdict:<7} {license:<15} {}@{}{via}{reason}",
             e.package.name, e.package.version
         )
         .unwrap();
