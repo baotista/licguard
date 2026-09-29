@@ -1,4 +1,5 @@
 mod inventory;
+mod normalize;
 mod policy;
 mod report;
 
@@ -59,7 +60,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .into_iter()
                 .filter(|p| include_dev || p.scope == Scope::Prod)
                 .map(|p| {
-                    let license = p.declared_license.as_deref().and_then(policy::normalize);
+                    let license = p.declared_license.as_deref().and_then(normalize::normalize);
                     let outcome = policy.evaluate(license.as_deref());
                     Evaluated {
                         verdict: outcome.verdict,

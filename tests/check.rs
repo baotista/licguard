@@ -652,14 +652,14 @@ fn deprecated_license_identifiers_are_still_understood() {
             r#"
             [policy]
             allow = ["MIT", "ISC"]
-            deny = ["GPL-3.0"]
+            deny = ["eCos-2.0"]
             "#,
         )
-        .declare_ms_license("GPL-3.0")
+        .declare_ms_license("eCos-2.0")
         .check()
         .code(1)
         .stdout(predicate::str::contains(
-            "DENY    GPL-3.0         ms@2.1.3  via app > ms\n",
+            "DENY    eCos-2.0        ms@2.1.3  via app > ms\n",
         ));
 }
 
@@ -874,4 +874,318 @@ fn dependency_resolves_to_the_nearest_copy_up_the_node_modules_tree() {
         .stdout(predicate::str::contains(
             "DENY    ISC             helper@2.0.0  via app > debug > ms > helper\n",
         ));
+}
+
+#[test]
+fn deprecated_gnu_identifier_in_policy_matches_its_current_one() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["GPL-3.0"]
+            "#,
+        )
+        .declare_ms_license("GPL-3.0-only")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    GPL-3.0-only    ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn deprecated_gnu_identifiers_are_mapped_to_current_ones() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["GPL-2.0-only", "LGPL-2.1-or-later"]
+            "#,
+        )
+        .declare_ms_license("GPL-2.0 OR LGPL-2.1+")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    GPL-2.0-only    ms@2.1.3  via app > ms  (elected from GPL-2.0-only OR LGPL-2.1-or-later)\n",
+        ));
+}
+
+#[test]
+fn common_alias_of_a_license_is_normalized() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            deny = ["Apache-2.0"]
+            "#,
+        )
+        .declare_ms_license("Apache 2")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    Apache-2.0      ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn license_identifier_in_another_case_is_normalized() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_MIT)
+        .declare_ms_license("mit AND isc")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT AND ISC     ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn full_spdx_license_name_is_normalized() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_MIT)
+        .declare_ms_license("MIT License OR apache license 2.0")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "REVIEW  Apache-2.0      ms@2.1.3  via app > ms  (unlisted, elected from MIT OR Apache-2.0)\n",
+        ));
+}
+
+#[test]
+fn legacy_license_object_is_normalized() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .replace_in(
+            "node_modules/ms/package.json",
+            r#""license": "MIT""#,
+            r#""license": {"type": "ISC", "url": "https://opensource.org/licenses/ISC"}"#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             ms@2.1.3  via app > ms\n",
+        ));
+}
+
+const REVIEW_ALL: &str = r#"
+    [policy]
+    review = ["MIT", "ISC"]
+"#;
+
+#[test]
+fn legacy_licenses_array_is_read_as_a_choice() {
+    Project::from_fixture("npm-basic")
+        .with_policy(REVIEW_ALL)
+        .replace_in(
+            "node_modules/ms/package.json",
+            r#""license": "MIT""#,
+            r#""licenses": [
+                {"type": "MIT", "url": "https://opensource.org/licenses/MIT"},
+                {"type": "ISC", "url": "https://opensource.org/licenses/ISC"}
+            ]"#,
+        )
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  MIT             ms@2.1.3  via app > ms  (elected from MIT OR ISC)\n",
+        ));
+}
+
+#[test]
+fn legacy_licenses_array_with_one_license_in_the_lockfile_is_that_license() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .remove("node_modules/wrappy")
+        .edit_lockfile(|packages| {
+            let wrappy = packages["node_modules/wrappy"].as_object_mut().unwrap();
+            wrappy.remove("license");
+            wrappy.insert("licenses".into(), serde_json::json!(["ISC"]));
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             wrappy@1.0.2  via app > once > wrappy\n",
+        ));
+}
+
+#[test]
+fn legacy_licenses_array_with_an_option_without_type_is_unresolved() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .replace_in(
+            "node_modules/ms/package.json",
+            r#""license": "MIT""#,
+            r#""licenses": [{"type": "MIT"}, {"url": "https://example.com/LICENSE"}]"#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn license_field_takes_precedence_over_legacy_licenses_array() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .replace_in(
+            "node_modules/ms/package.json",
+            r#""license": "MIT""#,
+            r#""license": "ISC", "licenses": [{"type": "MIT"}]"#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn noassertion_is_unresolved() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            unlisted = "allow"
+            "#,
+        )
+        .declare_ms_license("MIT OR NOASSERTION")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn unlicensed_package_is_unresolved() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC", "Unlicense"]
+            "#,
+        )
+        .declare_ms_license("UNLICENSED")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn license_name_without_a_version_is_unresolved_rather_than_guessed() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC", "GPL-3.0-only", "GPL-2.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL")
+        .replace_in(
+            "node_modules/once/package.json",
+            r#""license": "ISC""#,
+            r#""license": "gnu gpl v2""#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    ms@2.1.3  via app > ms\n",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    once@1.4.0  via app > once\n",
+        ));
+}
+
+#[test]
+fn normalized_license_uses_canonical_operators_and_only_needed_parentheses() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT"]
+            review = ["ISC"]
+            deny = ["BSD-3-Clause"]
+            "#,
+        )
+        .declare_ms_license("((MIT) and (ISC or BSD-3-Clause))")
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  MIT AND ISC     ms@2.1.3  via app > ms  (elected from MIT AND (ISC OR BSD-3-Clause))\n",
+        ));
+}
+
+#[test]
+fn deprecated_and_current_gnu_identifiers_in_two_lists_are_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "GPL-3.0"]
+            deny = ["GPL-3.0-only"]
+            "#,
+        )
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "`GPL-3.0-only` is in both `allow` and `deny`",
+        ));
+}
+
+#[test]
+fn slash_in_declared_license_is_read_as_or() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["ISC"]
+            review = ["X11"]
+            deny = ["MIT"]
+            "#,
+        )
+        .declare_ms_license("MIT/X11")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "REVIEW  X11             ms@2.1.3  via app > ms  (elected from MIT OR X11)\n",
+        ));
+}
+
+/// `npm-corpus` is a real-world lockfile (`npm install --package-lock-only`),
+/// plus the installed manifests of the old Packages whose legacy `licenses`
+/// field npm drops from the lockfile.
+#[test]
+fn at_least_98_percent_of_real_world_packages_are_resolved() {
+    let output = Project::from_fixture("npm-corpus")
+        .with_policy("[policy]\n")
+        .check_with(&["--include-dev"])
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let total: usize = stdout
+        .split(" packages (npm)")
+        .next()
+        .and_then(|header| header.rsplit(' ').next())
+        .and_then(|count| count.parse().ok())
+        .expect("the report header counts the packages");
+    let unresolved: Vec<&str> = stdout
+        .lines()
+        .filter(|line| line.contains("(unresolved)"))
+        .collect();
+    let rate = unresolved.len() as f64 / total as f64 * 100.0;
+    println!(
+        "{} of {total} packages unresolved ({rate:.2} %):\n{}",
+        unresolved.len(),
+        unresolved.join("\n")
+    );
+    assert!(total > 300, "the corpus has only {total} packages");
+    assert!(rate <= 2.0, "{rate:.2} % of the packages are unresolved");
 }

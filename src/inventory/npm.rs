@@ -26,6 +26,7 @@ struct LockEntry {
     name: Option<String>,
     version: Option<String>,
     license: Option<serde_json::Value>,
+    licenses: Option<serde_json::Value>,
     #[serde(default)]
     link: bool,
     /// Set by npm when the entry is reached only through `devDependencies`.
@@ -46,6 +47,7 @@ struct LockEntry {
 struct InstalledManifest {
     version: Option<String>,
     license: Option<serde_json::Value>,
+    licenses: Option<serde_json::Value>,
 }
 
 /// Reads the Project's `package-lock.json` and returns its Packages with
@@ -94,7 +96,7 @@ pub fn inventory(root: &Path) -> Result<Vec<LicensedPackage>> {
         };
         packages.push(LicensedPackage {
             declared_license: installed_license(&root.join(key), version)
-                .or_else(|| entry.license.as_ref().and_then(license_string)),
+                .or_else(|| declared_license(entry.license.as_ref(), entry.licenses.as_ref())),
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
             introduction_path: introduction_paths.get(key).cloned(),
             package: Package {
@@ -123,10 +125,33 @@ fn installed_license(dir: &Path, version: &str) -> Option<String> {
     if manifest.version.as_deref() != Some(version) {
         return None;
     }
-    manifest.license.as_ref().and_then(license_string)
+    declared_license(manifest.license.as_ref(), manifest.licenses.as_ref())
 }
 
-/// Legacy object forms of the `license` field are not understood yet.
+/// The Declared license of a manifest or lockfile entry: its `license`
+/// field, else the legacy `licenses` field.
+fn declared_license(
+    license: Option<&serde_json::Value>,
+    licenses: Option<&serde_json::Value>,
+) -> Option<String> {
+    license
+        .or(licenses)
+        .map(|l| license_string(l).unwrap_or_else(|| l.to_string()))
+}
+
+/// Reads a license field: an expression, the legacy
+/// `{"type": "MIT", "url": ...}` object, or a legacy array of either, which
+/// offers a choice between its options (`A OR B`), as npm documents it.
+/// Returns `None` for any other shape; the caller then keeps its JSON text,
+/// which never normalizes, so the Package is Unresolved rather than taking
+/// its license from the next License origin.
 fn license_string(license: &serde_json::Value) -> Option<String> {
-    license.as_str().map(str::to_string)
+    match license {
+        serde_json::Value::Object(object) => object.get("type")?.as_str().map(str::to_string),
+        serde_json::Value::Array(options) if !options.is_empty() => {
+            let options: Option<Vec<String>> = options.iter().map(license_string).collect();
+            Some(options?.join(" OR "))
+        }
+        _ => license.as_str().map(str::to_string),
+    }
 }

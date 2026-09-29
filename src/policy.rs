@@ -7,6 +7,8 @@ use serde::Deserialize;
 use spdx::expression::{ExprNode, Operator};
 use spdx::{LicenseItem, LicenseReq};
 
+use crate::normalize;
+
 const CONFIG: &str = "licguard.toml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -89,27 +91,27 @@ impl Policy {
         })?;
         let config: Config =
             toml::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
-        let policy = config.policy;
-        let lists = [
-            ("allow", &policy.allow),
-            ("review", &policy.review),
-            ("deny", &policy.deny),
-        ];
-        let mut seen: HashMap<&str, &str> = HashMap::new();
-        for (list, entries) in lists {
-            for id in entries {
-                if !is_policy_entry(id) {
+        let mut policy = config.policy;
+        let mut seen: HashMap<String, &str> = HashMap::new();
+        for (list, entries) in [
+            ("allow", &mut policy.allow),
+            ("review", &mut policy.review),
+            ("deny", &mut policy.deny),
+        ] {
+            for entry in entries.iter_mut() {
+                let Some(id) = policy_entry(entry) else {
                     bail!(
-                        "{}: `{id}` is not an SPDX license identifier, optionally followed by `WITH <exception>`\nhint: see https://spdx.org/licenses/",
+                        "{}: `{entry}` is not an SPDX license identifier, optionally followed by `WITH <exception>`\nhint: see https://spdx.org/licenses/",
                         path.display()
                     );
-                }
-                if let Some(first) = seen.insert(id, list).filter(|first| *first != list) {
+                };
+                if let Some(first) = seen.insert(id.clone(), list).filter(|first| *first != list) {
                     bail!(
                         "{}: `{id}` is in both `{first}` and `{list}`\nhint: keep it in exactly one list",
                         path.display()
                     );
                 }
+                *entry = id;
             }
         }
         Ok(policy)
@@ -192,16 +194,9 @@ impl Policy {
     }
 }
 
-/// Normalizes a Declared license into an SPDX expression; `None` when it is
-/// not a valid one.
-pub fn normalize(declared: &str) -> Option<String> {
-    let declared = declared.trim();
-    parse(declared).ok().map(|_| declared.to_string())
-}
-
-/// Strict SPDX parsing, except that deprecated identifiers (e.g. `GPL-3.0`)
-/// are accepted as they are; mapping them to current ones comes with alias
-/// normalization.
+/// Strict SPDX parsing, except that deprecated identifiers (e.g. `eCos-2.0`)
+/// are accepted: Normalized licenses keep those that have no current
+/// equivalent.
 fn parse(expression: &str) -> Result<spdx::Expression, spdx::ParseError> {
     spdx::Expression::parse_mode(
         expression,
@@ -232,13 +227,15 @@ fn base_version(license: &LicenseItem) -> Option<LicenseItem> {
 
 /// A policy entry is a single license term (`MIT`, `Apache-2.0+`,
 /// `GPL-2.0-only WITH Classpath-exception-2.0`) written in canonical form.
-fn is_policy_entry(entry: &str) -> bool {
-    let Ok(expression) = parse(entry) else {
-        return false;
-    };
+/// Returns it as it is matched against Normalized licenses: with a deprecated
+/// GNU identifier mapped to its current one (`GPL-3.0` -> `GPL-3.0-only`).
+fn policy_entry(entry: &str) -> Option<String> {
+    let expression = parse(entry).ok()?;
     let mut nodes = expression.iter();
-    matches!(
-        (nodes.next(), nodes.next()),
-        (Some(ExprNode::Req(req)), None) if req.req.to_string() == entry
-    )
+    match (nodes.next(), nodes.next()) {
+        (Some(ExprNode::Req(req)), None) if req.req.to_string() == entry => {
+            Some(normalize::current_gnu(&req.req).to_string())
+        }
+        _ => None,
+    }
 }
