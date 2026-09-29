@@ -1,0 +1,11 @@
+{
+  "name": "ui",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "once": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/ms": "^0.7.34"
+  }
+}

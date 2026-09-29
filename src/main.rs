@@ -59,20 +59,23 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             let policy = Policy::load(&path)?;
             let include_dev = include_dev || policy.include_dev;
-            let packages = inventory::npm::inventory(&path)?;
+            let inventory = inventory::inventory(&path)?;
             // Matched against the whole inventory: a clarification for an
             // excluded `dev` Dependency still applies to something.
             let mut warnings: Vec<Warning> = policy
                 .clarifications
                 .iter()
-                .filter(|c| !packages.iter().any(|p| c.matches(&p.package)))
+                .filter(|c| !inventory.packages.iter().any(|p| c.matches(&p.package)))
                 .map(|c| Warning::UnmatchedClarification {
                     package: c.package.clone(),
                     version: c.version.clone(),
                 })
                 .collect();
             warnings.sort();
-            let mut evaluated: Vec<Evaluated> = packages
+            // With a single Inventory source, naming it adds nothing.
+            let several_sources = inventory.sources.len() > 1;
+            let mut evaluated: Vec<Evaluated> = inventory
+                .packages
                 .into_iter()
                 .filter(|p| include_dev || p.scope == Scope::Prod)
                 .map(|p| {
@@ -91,6 +94,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
                         clarified: clarification.is_some(),
                         package: p.package,
                         introduction_path: p.introduction_path,
+                        sources: if several_sources {
+                            p.sources
+                        } else {
+                            Vec::new()
+                        },
                     }
                 })
                 .collect();

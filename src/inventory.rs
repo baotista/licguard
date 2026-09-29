@@ -1,4 +1,38 @@
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::path::Path;
+
+use anyhow::Result;
+
 pub mod npm;
+
+/// The Packages of a Project, and the Inventory sources they come from.
+pub struct Inventory {
+    /// Paths relative to the Project root, joined with `/`, sorted.
+    pub sources: Vec<String>,
+    pub packages: Vec<LicensedPackage>,
+}
+
+/// Reads every Inventory source of the Project, in sorted order, and returns
+/// its Packages, each once: see [`LicensedPackage::merge`].
+pub fn inventory(project: &Path) -> Result<Inventory> {
+    let sources = npm::lockfiles(project)?;
+    let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
+    for source in &sources {
+        for found in npm::inventory(project, source)? {
+            match packages.entry(found.package.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(found);
+                }
+                Entry::Occupied(mut entry) => entry.get_mut().merge(found),
+            }
+        }
+    }
+    Ok(Inventory {
+        sources,
+        packages: packages.into_values().collect(),
+    })
+}
 
 /// A published artifact identified by ecosystem, name and version.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,6 +65,28 @@ pub struct LicensedPackage {
     /// Package names from the Project root to this Package; `None` when it is
     /// not reachable from the root.
     pub introduction_path: Option<Vec<String>>,
+    /// The Inventory sources the Package was found in, sorted.
+    pub sources: Vec<String>,
+}
+
+impl LicensedPackage {
+    /// Merges `other`, a later occurrence of the same Package: the Package is
+    /// `prod` if any occurrence is, keeps the Introduction path of the first
+    /// occurrence with that Scope, and the first Declared license found.
+    fn merge(&mut self, other: LicensedPackage) {
+        for source in other.sources {
+            if !self.sources.contains(&source) {
+                self.sources.push(source);
+            }
+        }
+        if self.declared_license.is_none() {
+            self.declared_license = other.declared_license;
+        }
+        if self.scope == Scope::Dev && other.scope == Scope::Prod {
+            self.scope = Scope::Prod;
+            self.introduction_path = other.introduction_path;
+        }
+    }
 }
 
 /// Whether a Dependency is needed by what the Project ships (`Prod`) or only
