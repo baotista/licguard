@@ -1840,6 +1840,20 @@ fn waiver_expiry_date_that_is_not_a_calendar_date_is_a_runtime_error() {
 }
 
 #[test]
+fn waiver_expiry_date_in_another_iso_8601_form_is_a_runtime_error() {
+    for expires in ["\"20270101\"", "\"+002027-01-01\"", "\"2027-01-01T00:00\""] {
+        Project::from_fixture("npm-basic")
+            .with_policy(&format!("{ALLOW_ALL}{}", waiver_expiring(expires)))
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "waiver #1 (`ms`): `expires` {} is not a calendar date written `YYYY-MM-DD`",
+                expires.replace('"', "`")
+            )));
+    }
+}
+
+#[test]
 fn waiver_expiry_date_is_a_string_or_a_toml_local_date() {
     for expires in [
         "\"2027-12-31\"",
@@ -3699,6 +3713,30 @@ fn today_is_the_current_date_when_licguard_today_is_not_set() {
         .stdout(predicate::str::contains(
             "warning: waiver for ms expired on 2000-01-01\n",
         ));
+}
+
+#[test]
+fn today_is_the_local_date_when_licguard_today_is_not_set() {
+    // Kiritimati (UTC+14) and Pago Pago (UTC-11) are 25 hours apart, so their
+    // local dates always differ, whatever the time of day.
+    let days_until_expiry_in = |time_zone| {
+        let project = Project::from_fixture("npm-basic")
+            .with_policy(&format!(
+                "[policy]\nallow = [\"ISC\"]\ndeny = [\"MIT\"]\nwaiver_expiry_warning_days = 1000000\n{}",
+                waiver_expiring("\"2999-12-31\"")
+            ))
+            .without_env("LICGUARD_TODAY")
+            .with_env("TZ", time_zone);
+        let json = stdout_json(project.check_with(&["--format", "json"]).code(1));
+        assert_eq!(json["warnings"][0]["kind"], "expiring_waiver");
+        json["warnings"][0]["days"].as_i64().unwrap()
+    };
+    let ahead = days_until_expiry_in("Pacific/Kiritimati");
+    let behind = days_until_expiry_in("Pacific/Pago_Pago");
+    assert!(
+        behind - ahead >= 1,
+        "{behind} days from Pago Pago is not more than {ahead} days from Kiritimati"
+    );
 }
 
 #[test]
