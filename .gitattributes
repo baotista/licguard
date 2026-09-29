@@ -1,0 +1,3 @@
+# pnpm writes its lockfile with LF line endings; the tests edit several
+# lines of it at once.
+tests/fixtures/pnpm-*/pnpm-lock.yaml text eol=lf

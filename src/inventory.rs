@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 
 pub mod npm;
 mod paths;
+pub mod pnpm;
 pub mod yarn;
 
 /// The Packages of a Project, and the Inventory sources they come from.
@@ -22,10 +23,10 @@ pub fn inventory(project: &Path) -> Result<Inventory> {
     let sources = lockfiles(project)?;
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for source in &sources {
-        let found = if source.rsplit('/').next() == Some(yarn::LOCKFILE) {
-            yarn::inventory(project, source)?
-        } else {
-            npm::inventory(project, source)?
+        let found = match source.rsplit('/').next() {
+            Some(yarn::LOCKFILE) => yarn::inventory(project, source)?,
+            Some(pnpm::LOCKFILE) => pnpm::inventory(project, source)?,
+            _ => npm::inventory(project, source)?,
         };
         for found in found {
             match packages.entry(found.package.clone()) {
@@ -42,18 +43,19 @@ pub fn inventory(project: &Path) -> Result<Inventory> {
     })
 }
 
-/// Finds the Project's Inventory sources: every `package-lock.json` and
-/// `yarn.lock` under `project`, skipping `node_modules` and hidden
-/// directories. Returns their paths relative to `project`, joined with `/`,
-/// sorted.
+/// Finds the Project's Inventory sources: every `package-lock.json`,
+/// `yarn.lock` and `pnpm-lock.yaml` under `project`, skipping `node_modules`
+/// and hidden directories. Returns their paths relative to `project`, joined
+/// with `/`, sorted.
 fn lockfiles(project: &Path) -> Result<Vec<String>> {
     let mut found = Vec::new();
     find_lockfiles(project, "", &mut found)?;
     if found.is_empty() {
         bail!(
-            "no {} or {} found under {}\nhint: run licguard at the root of an npm or Yarn Project, or run `npm install` or `yarn install` to create the lockfile",
+            "no {}, {} or {} found under {}\nhint: run licguard at the root of an npm, Yarn or pnpm Project, or run `npm install`, `yarn install` or `pnpm install` to create the lockfile",
             npm::LOCKFILE,
             yarn::LOCKFILE,
+            pnpm::LOCKFILE,
             project.display()
         );
     }
@@ -70,7 +72,9 @@ fn find_lockfiles(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result
         let file_type = entry
             .file_type()
             .with_context(|| format!("cannot read {}", entry.path().display()))?;
-        if file_type.is_file() && (name == npm::LOCKFILE || name == yarn::LOCKFILE) {
+        if file_type.is_file()
+            && [npm::LOCKFILE, yarn::LOCKFILE, pnpm::LOCKFILE].contains(&name.as_str())
+        {
             found.push(path);
         } else if file_type.is_dir() && name != "node_modules" && !name.starts_with('.') {
             find_lockfiles(&entry.path(), &format!("{path}/"), found)?;
