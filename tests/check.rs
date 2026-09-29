@@ -3715,6 +3715,25 @@ fn waive_renews_the_expired_waiver_of_a_violation_in_place() {
 }
 
 #[test]
+fn waive_renews_the_waiver_of_a_package_whose_license_changed() {
+    // The Waiver no longer matches: `once@1.4.0` is ISC, not MIT.
+    let project = Project::from_fixture("npm-basic").with_policy(&format!(
+        "{DENY_ISC}{}",
+        waiver("once", Some("1.4.0"), "MIT")
+    ));
+    project.waive_with(&WAIVE_ALL).success();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{DENY_ISC}{}{}",
+            waived("once", "1.4.0", "ISC"),
+            waived("wrappy", "1.0.2", "ISC")
+        )
+    );
+    project.check().success();
+}
+
+#[test]
 fn waive_in_strict_mode_also_waives_reviewed_packages() {
     let project = Project::from_fixture("npm-basic").with_policy(REVIEW_ISC);
     project
@@ -3848,6 +3867,23 @@ fn waive_without_a_reason_is_a_runtime_error() {
             "`--reason` is blank",
         );
     }
+}
+
+#[test]
+fn waive_writes_the_reason_trimmed() {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    let [all, reason, text, expires, date] = WAIVE_ALL;
+    project
+        .waive_with(&[all, reason, &format!("  {text}\n"), expires, date])
+        .success();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{DENY_ISC}{}{}",
+            waived("once", "1.4.0", "ISC"),
+            waived("wrappy", "1.0.2", "ISC")
+        )
+    );
 }
 
 #[test]
