@@ -41,7 +41,7 @@ enum Command {
         #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
         format: CheckFormat,
         /// Write the report to this file instead of stdout
-        #[arg(long)]
+        #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
     },
     /// Show every Package with its license, Verdict and License origin
@@ -59,7 +59,7 @@ enum Command {
         #[arg(long, value_enum)]
         group_by: Option<GroupBy>,
         /// Write the inventory to this file instead of stdout
-        #[arg(long)]
+        #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
     },
 }
