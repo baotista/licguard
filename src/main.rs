@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-use policy::{Policy, Verdict};
+use policy::Policy;
 use report::Evaluated;
 
 #[derive(Parser)]
@@ -25,6 +25,9 @@ enum Command {
         /// Project directory
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Treat `review` Verdicts as Violations
+        #[arg(long)]
+        strict: bool,
     },
 }
 
@@ -41,22 +44,24 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<ExitCode> {
     match cli.command {
-        Command::Check { path } => {
+        Command::Check { path, strict } => {
             let policy = Policy::load(&path)?;
             let mut evaluated: Vec<Evaluated> = inventory::npm::inventory(&path)?
                 .into_iter()
                 .map(|p| {
                     let license = p.declared_license.as_deref().and_then(policy::normalize);
+                    let (verdict, reason) = policy.evaluate(license.as_deref());
                     Evaluated {
-                        verdict: policy.evaluate(license.as_deref()),
+                        verdict,
+                        reason,
                         license,
                         package: p.package,
                     }
                 })
                 .collect();
             evaluated.sort_by(|a, b| (a.verdict, &a.package).cmp(&(b.verdict, &b.package)));
-            print!("{}", report::text(&evaluated));
-            let violated = evaluated.iter().any(|e| e.verdict == Verdict::Deny);
+            let violated = evaluated.iter().any(|e| e.verdict.is_violation(strict));
+            print!("{}", report::text(&evaluated, violated));
             Ok(if violated {
                 ExitCode::from(1)
             } else {

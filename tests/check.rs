@@ -64,10 +64,15 @@ impl Project {
     }
 
     fn check(&self) -> assert_cmd::assert::Assert {
+        self.check_with(&[])
+    }
+
+    fn check_with(&self, args: &[&str]) -> assert_cmd::assert::Assert {
         Command::cargo_bin("licguard")
             .unwrap()
             .arg("check")
             .arg(self.path())
+            .args(args)
             .assert()
     }
 }
@@ -248,10 +253,10 @@ fn packages_are_listed_by_verdict_then_name_in_stable_order() {
         [
             "DENY    ISC             once@1.4.0",
             "DENY    ISC             wrappy@1.0.2",
-            "REVIEW  MIT             @types/ms@0.7.34",
-            "REVIEW  MIT             debug@4.3.4",
-            "REVIEW  MIT             ms@2.1.2",
-            "REVIEW  MIT             ms@2.1.3",
+            "REVIEW  MIT             @types/ms@0.7.34  (unlisted)",
+            "REVIEW  MIT             debug@4.3.4  (unlisted)",
+            "REVIEW  MIT             ms@2.1.2  (unlisted)",
+            "REVIEW  MIT             ms@2.1.3  (unlisted)",
         ]
     );
 }
@@ -360,4 +365,103 @@ fn declared_license_with_or_later_suffix_is_unresolved_until_expressions_are_sup
         .check()
         .code(1)
         .stdout(predicate::str::contains("DENY    (unresolved)    ms@2.1.3"));
+}
+
+const REVIEW_ISC: &str = r#"
+    [policy]
+    allow = ["MIT"]
+    review = ["ISC"]
+"#;
+
+#[test]
+fn license_in_review_list_is_reviewed_without_failing() {
+    Project::from_fixture("npm-basic")
+        .with_policy(REVIEW_ISC)
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  ISC             once@1.4.0\n",
+        ))
+        .stdout(predicate::str::contains("0 deny · 2 review · 4 allow"));
+}
+
+#[test]
+fn strict_mode_makes_reviewed_licenses_violations() {
+    Project::from_fixture("npm-basic")
+        .with_policy(REVIEW_ISC)
+        .check_with(&["--strict"])
+        .code(1)
+        .stdout(predicate::str::contains(
+            "REVIEW  ISC             once@1.4.0\n",
+        ))
+        .stdout(predicate::str::contains("✗ Policy violated (exit 1)"));
+}
+
+#[test]
+fn unresolved_setting_sets_the_verdict_of_unresolved_licenses() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            unresolved = "review"
+            "#,
+        )
+        .remove("node_modules/wrappy")
+        .edit_lockfile(|packages| {
+            packages["node_modules/wrappy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("license");
+        })
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  (unresolved)    wrappy@1.0.2",
+        ));
+}
+
+#[test]
+fn unlisted_setting_sets_the_verdict_of_unlisted_licenses() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT"]
+            unlisted = "deny"
+            "#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             once@1.4.0",
+        ));
+}
+
+#[test]
+fn unlisted_verdict_reason_is_shown() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT"]
+            "#,
+        )
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  ISC             once@1.4.0  (unlisted)\n",
+        ));
+}
+
+#[test]
+fn invalid_verdict_setting_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy("[policy]\nunresolved = \"block\"\n")
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("licguard.toml is invalid"))
+        .stderr(predicate::str::contains("allow"))
+        .stderr(predicate::str::contains("review"))
+        .stderr(predicate::str::contains("deny"));
 }
