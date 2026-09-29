@@ -96,6 +96,15 @@ impl Project {
         self.run("list", args)
     }
 
+    fn init_with(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+        self.run("init", args)
+    }
+
+    /// The Project's `licguard.toml`.
+    fn policy_file(&self) -> String {
+        fs::read_to_string(self.dir.path().join("licguard.toml")).unwrap()
+    }
+
     /// Runs `licguard <command>` on the Project, with `args` after its path.
     fn run(&self, command: &str, args: &[&str]) -> assert_cmd::assert::Assert {
         Command::cargo_bin("licguard")
@@ -2590,4 +2599,164 @@ fn waived_package_is_reported_as_such_in_json() {
         check["summary"],
         serde_json::json!({"deny": 1, "review": 0, "allow": 5, "waived": 1})
     );
+}
+
+#[test]
+fn init_writes_a_policy_that_check_and_list_accept() {
+    let project = Project::from_fixture("npm-basic");
+
+    project.init_with(&[]).success();
+
+    project.check().success();
+    project.list_with(&[]).success();
+}
+
+#[test]
+fn init_says_the_template_is_not_legal_advice() {
+    let project = Project::from_fixture("npm-basic");
+    let written = project.path().join("licguard.toml");
+
+    project
+        .init_with(&[])
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "wrote {}",
+            written.display()
+        )))
+        .stdout(predicate::str::contains("run `licguard check`"))
+        .stdout(predicate::str::contains("not legal advice"))
+        .stdout(predicate::str::contains("your own legal counsel"));
+
+    let policy = project.policy_file();
+    assert!(policy.starts_with('#'), "the disclaimer heads the file");
+    assert!(policy.contains("not legal advice"));
+    assert!(policy.contains("your own legal counsel"));
+}
+
+#[test]
+fn init_template_sets_every_list_and_setting_with_a_comment() {
+    let project = Project::from_fixture("npm-basic");
+    project.init_with(&[]).success();
+    let text = project.policy_file();
+
+    let config: toml::Table = toml::from_str(&text).unwrap();
+    let expected: toml::Table = toml::from_str(
+        r#"
+        allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "0BSD", "Unlicense", "CC0-1.0"]
+        review = ["MPL-2.0", "LGPL-2.1-only", "LGPL-3.0-only", "EPL-2.0", "CDDL-1.0"]
+        deny = ["GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only", "SSPL-1.0", "BUSL-1.1"]
+        unresolved = "deny"
+        unlisted = "review"
+        include_dev = false
+        "#,
+    )
+    .unwrap();
+    assert_eq!(config["policy"], toml::Value::Table(expected));
+
+    let lines: Vec<&str> = text.lines().collect();
+    for key in [
+        "allow",
+        "review",
+        "deny",
+        "unresolved",
+        "unlisted",
+        "include_dev",
+    ] {
+        let at = lines
+            .iter()
+            .position(|line| line.starts_with(&format!("{key} =")))
+            .unwrap_or_else(|| panic!("`{key}` is set"));
+        assert!(lines[at - 1].starts_with('#'), "a comment explains `{key}`");
+    }
+}
+
+/// Uncomments the commented-out TOML lines of `text`: a `# [[table]]` header
+/// or a `# key = value` pair.
+fn uncomment_examples(text: &str) -> String {
+    text.lines()
+        .map(|line| match line.strip_prefix("# ") {
+            Some(toml)
+                if (toml.starts_with("[[") && toml.ends_with("]]"))
+                    || toml.split_once(" =").is_some_and(|(key, _)| {
+                        key.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    }) =>
+            {
+                toml
+            }
+            _ => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn init_template_examples_are_valid_once_uncommented() {
+    let project = Project::from_fixture("npm-basic");
+    project.init_with(&[]).success();
+    let uncommented = uncomment_examples(&project.policy_file());
+
+    let config: toml::Table = toml::from_str(&uncommented).unwrap();
+    let keys = |array: &str| -> Vec<Vec<String>> {
+        config
+            .get(array)
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| panic!("an example `[[{array}]]` entry"))
+            .iter()
+            .map(|entry| {
+                let mut keys: Vec<String> = entry.as_table().unwrap().keys().cloned().collect();
+                keys.sort();
+                keys
+            })
+            .collect()
+    };
+    assert_eq!(
+        keys("clarifications"),
+        [["evidence", "license", "package", "version"]]
+    );
+    assert_eq!(
+        keys("waivers"),
+        [["expires", "license", "package", "reason", "version"]]
+    );
+    // A placeholder that never looks like a real date that has passed.
+    assert_eq!(config["waivers"][0]["expires"].as_str(), Some("2099-12-31"));
+
+    project
+        .with_policy(&uncommented)
+        .check()
+        .success()
+        .stderr("");
+}
+
+#[test]
+fn init_refuses_to_overwrite_an_existing_policy_without_force() {
+    let project = Project::from_fixture("npm-basic").with_policy(ALLOW_ALL);
+
+    project
+        .init_with(&[])
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::contains("licguard.toml already exists"))
+        .stderr(predicate::str::contains("hint: pass `--force`"));
+    assert_eq!(project.policy_file(), ALLOW_ALL);
+
+    project.init_with(&["--force"]).success();
+    assert!(project.policy_file().contains("not legal advice"));
+    project.check().success();
+}
+
+#[test]
+fn init_in_a_missing_directory_is_a_runtime_error() {
+    let project = Project::from_fixture("npm-basic");
+
+    Command::cargo_bin("licguard")
+        .unwrap()
+        .arg("init")
+        .arg(project.path().join("missing"))
+        .assert()
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::contains("cannot write"))
+        .stderr(predicate::str::contains(
+            "hint: check that the directory exists and is writable",
+        ));
 }

@@ -1,5 +1,6 @@
 mod clarification;
 mod evaluation;
+mod init;
 mod inventory;
 mod json;
 mod normalize;
@@ -62,6 +63,15 @@ enum Command {
         /// Write the inventory to this file instead of stdout
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
+    },
+    /// Write a neutral template Policy to the Project's licguard.toml
+    Init {
+        /// Project directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Overwrite an existing licguard.toml
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -131,6 +141,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ListFormat::Json => json::list(&evaluation),
             };
             emit(&out, output.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Init { path, force } => {
+            print!("{}", init::init(&path, force)?);
             Ok(ExitCode::SUCCESS)
         }
     }
