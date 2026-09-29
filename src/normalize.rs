@@ -18,20 +18,27 @@ const ALIASES: &[(&str, &str)] = &[
 /// when its intent is not unambiguous, i.e. the Package is Unresolved.
 ///
 /// Beyond strict SPDX, it accepts `/` as `OR`, lower-case operators, `+` on
-/// GNU licenses, deprecated identifiers and the [`ALIASES`].
+/// GNU licenses, deprecated identifiers and the [`ALIASES`]. `NOASSERTION`
+/// anywhere means the license is unknown.
 pub fn normalize(declared: &str) -> Option<String> {
     let mode = spdx::ParseMode {
         allow_imprecise_license_names: false,
         ..spdx::ParseMode::LAX
     };
     let expression = spdx::Expression::parse_mode(&replace_aliases(declared), mode).ok()?;
-    Some(render(&expression))
+    let unknown = expression.requirements().any(|r| {
+        r.req
+            .license
+            .id()
+            .is_some_and(|id| id.name == "NOASSERTION")
+    });
+    (!unknown).then(|| render(&expression))
 }
 
 /// Replaces each license term that is an alias, or an SPDX identifier or
-/// full name in another case (`mit`, `MIT License`), by its SPDX identifier. A term is the text between
-/// parentheses, `/` and operators, so it may contain spaces
-/// (`Apache License, Version 2.0 OR MIT`).
+/// full name in another case (`mit`, `MIT License`), by its SPDX identifier.
+/// A term is the text between parentheses, `/` and operators, so it may
+/// contain spaces (`Apache License, Version 2.0 OR MIT`).
 fn replace_aliases(declared: &str) -> String {
     let spaced = declared
         .replace('(', " ( ")

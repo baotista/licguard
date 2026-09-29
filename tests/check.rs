@@ -1044,6 +1044,24 @@ fn license_field_takes_precedence_over_legacy_licenses_array() {
 }
 
 #[test]
+fn noassertion_is_unresolved() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            unlisted = "allow"
+            "#,
+        )
+        .declare_ms_license("MIT OR NOASSERTION")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
 fn unlicensed_package_is_unresolved() {
     Project::from_fixture("npm-basic")
         .with_policy(
