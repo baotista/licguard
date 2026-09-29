@@ -1,4 +1,5 @@
 mod clarification;
+mod date;
 mod evaluation;
 mod init;
 mod inventory;
@@ -26,9 +27,13 @@ struct Cli {
     command: Command,
 }
 
+/// The help text of the commands that evaluate Waivers.
+const TODAY_HELP: &str = "Waiver expiry is evaluated as of today (UTC); set LICGUARD_TODAY=YYYY-MM-DD to evaluate it as of another date, e.g. to re-run an old CI job.";
+
 #[derive(Subcommand)]
 enum Command {
     /// Evaluate the Project against its Policy and set the exit code
+    #[command(after_help = TODAY_HELP)]
     Check {
         /// Project directory
         #[arg(default_value = ".")]
@@ -47,6 +52,7 @@ enum Command {
         output: Option<PathBuf>,
     },
     /// Show every Package with its license, Verdict and License origin
+    #[command(after_help = TODAY_HELP)]
     List {
         /// Project directory
         #[arg(default_value = ".")]

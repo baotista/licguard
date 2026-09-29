@@ -3,6 +3,7 @@
 
 use serde::Deserialize;
 
+use crate::date::Date;
 use crate::inventory::Package;
 use crate::{normalize, policy};
 
@@ -21,9 +22,13 @@ pub struct Waiver {
     pub license: String,
     #[serde(default)]
     pub reason: String,
-    /// A `YYYY-MM-DD` string or a TOML local date, once validated.
-    #[serde(default)]
-    pub expires: Option<toml::Value>,
+    /// The `expires` field as written: a `YYYY-MM-DD` string or a TOML local
+    /// date.
+    #[serde(rename = "expires")]
+    written_expires: Option<toml::Value>,
+    /// The last day the Waiver applies, set by [`Waiver::validate`].
+    #[serde(skip)]
+    pub expires: Date,
 }
 
 impl Waiver {
@@ -36,6 +41,12 @@ impl Waiver {
                 .as_ref()
                 .is_none_or(|version| *version == package.version)
             && license == Some(self.license.as_str())
+    }
+
+    /// Whether the Waiver no longer applies on `today`: it still applies on
+    /// its `expires` day.
+    pub fn is_expired(&self, today: Date) -> bool {
+        self.expires < today
     }
 
     /// Checks the entry and puts its license in canonical form. The error
@@ -62,29 +73,30 @@ impl Waiver {
                 return Err(format!("`{field}` is missing or empty\nhint: {hint}"));
             }
         }
-        match &self.expires {
-            None => {
-                return Err(
-                    "`expires` is missing\nhint: set the date until which the license is tolerated, e.g. `2027-01-01`"
-                        .to_string(),
-                );
-            }
-            Some(toml::Value::String(text)) if is_calendar_date(text) => {}
+        let Some(written) = &self.written_expires else {
+            return Err(
+                "`expires` is missing\nhint: set the date until which the license is tolerated, e.g. `2027-01-01`"
+                    .to_string(),
+            );
+        };
+        let expires = match written {
+            toml::Value::String(text) => Date::parse(text),
             // A local date only: a time or an offset makes it a datetime.
-            Some(toml::Value::Datetime(date))
-                if date.time.is_none()
-                    && date.offset.is_none()
-                    && is_calendar_date(&date.to_string()) => {}
-            Some(value) => {
-                let shown = match value {
-                    toml::Value::String(text) => text.clone(),
-                    other => other.to_string(),
-                };
-                return Err(format!(
-                    "`expires` `{shown}` is not a calendar date written `YYYY-MM-DD`\nhint: write the date as `expires = \"2027-01-01\"` or `expires = 2027-01-01`"
-                ));
+            toml::Value::Datetime(date) if date.time.is_none() && date.offset.is_none() => {
+                Date::parse(&date.to_string())
             }
-        }
+            _ => None,
+        };
+        let Some(expires) = expires else {
+            let shown = match written {
+                toml::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            return Err(format!(
+                "`expires` `{shown}` is not a calendar date written `YYYY-MM-DD`\nhint: write the date as `expires = \"2027-01-01\"` or `expires = 2027-01-01`"
+            ));
+        };
+        self.expires = expires;
         let Ok(expression) = policy::parse(&self.license) else {
             return Err(format!(
                 "`license` `{}` is not a valid SPDX expression\nhint: use SPDX identifiers and upper-case operators, e.g. `MIT OR Apache-2.0`; see https://spdx.org/licenses/",
@@ -100,27 +112,4 @@ impl Waiver {
         self.license = normalize::render(&expression);
         Ok(())
     }
-}
-
-/// Whether `text` is a real calendar date written `YYYY-MM-DD`.
-fn is_calendar_date(text: &str) -> bool {
-    let well_formed = text.len() == 10
-        && text.bytes().enumerate().all(|(i, byte)| match i {
-            4 | 7 => byte == b'-',
-            _ => byte.is_ascii_digit(),
-        });
-    if !well_formed {
-        return false;
-    }
-    let number = |range: std::ops::Range<usize>| text[range].parse::<u32>().unwrap();
-    let (year, month, day) = (number(0..4), number(5..7), number(8..10));
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => return false,
-    };
-    (1..=days).contains(&day)
 }
