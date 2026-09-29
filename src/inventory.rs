@@ -1,10 +1,13 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
 pub mod npm;
+mod paths;
+pub mod yarn;
 
 /// The Packages of a Project, and the Inventory sources they come from.
 pub struct Inventory {
@@ -16,10 +19,15 @@ pub struct Inventory {
 /// Reads every Inventory source of the Project, in sorted order, and returns
 /// its Packages, each once: see [`LicensedPackage::merge`].
 pub fn inventory(project: &Path) -> Result<Inventory> {
-    let sources = npm::lockfiles(project)?;
+    let sources = lockfiles(project)?;
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for source in &sources {
-        for found in npm::inventory(project, source)? {
+        let found = if source.rsplit('/').next() == Some(yarn::LOCKFILE) {
+            yarn::inventory(project, source)?
+        } else {
+            npm::inventory(project, source)?
+        };
+        for found in found {
             match packages.entry(found.package.clone()) {
                 Entry::Vacant(entry) => {
                     entry.insert(found);
@@ -32,6 +40,43 @@ pub fn inventory(project: &Path) -> Result<Inventory> {
         sources,
         packages: packages.into_values().collect(),
     })
+}
+
+/// Finds the Project's Inventory sources: every `package-lock.json` and
+/// `yarn.lock` under `project`, skipping `node_modules` and hidden
+/// directories. Returns their paths relative to `project`, joined with `/`,
+/// sorted.
+fn lockfiles(project: &Path) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    find_lockfiles(project, "", &mut found)?;
+    if found.is_empty() {
+        bail!(
+            "no {} or {} found under {}\nhint: run licguard at the root of an npm or Yarn Project, or run `npm install` or `yarn install` to create the lockfile",
+            npm::LOCKFILE,
+            yarn::LOCKFILE,
+            project.display()
+        );
+    }
+    found.sort();
+    Ok(found)
+}
+
+fn find_lockfiles(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result<()> {
+    let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = format!("{relative}{name}");
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("cannot read {}", entry.path().display()))?;
+        if file_type.is_file() && (name == npm::LOCKFILE || name == yarn::LOCKFILE) {
+            found.push(path);
+        } else if file_type.is_dir() && name != "node_modules" && !name.starts_with('.') {
+            find_lockfiles(&entry.path(), &format!("{path}/"), found)?;
+        }
+    }
+    Ok(())
 }
 
 /// A published artifact identified by ecosystem, name and version.

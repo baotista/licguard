@@ -353,7 +353,9 @@ fn missing_lockfile_is_a_runtime_error() {
         .remove("package-lock.json")
         .check()
         .code(2)
-        .stderr(predicate::str::contains("no package-lock.json found under"))
+        .stderr(predicate::str::contains(
+            "no package-lock.json or yarn.lock found under",
+        ))
         .stderr(predicate::str::contains("hint:"));
 }
 
@@ -2137,6 +2139,237 @@ fn lockfiles_in_node_modules_and_hidden_directories_are_ignored() {
         .stdout(predicate::str::contains("6 packages (npm)"));
 }
 
+/// The Verdict lines of a `check` report, in order.
+fn verdict_lines(assert: assert_cmd::assert::Assert) -> Vec<String> {
+    String::from_utf8(assert.get_output().stdout.clone())
+        .unwrap()
+        .lines()
+        .filter(|l| l.starts_with("DENY") || l.starts_with("REVIEW") || l.starts_with("ALLOW"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// `yarn-v1` and `yarn-berry` are the same real Yarn Project (`yarn install`
+/// with Yarn 1.22 and Yarn 4 with `nodeLinker: node-modules`): the root `app`
+/// depends on `debug@4.3.4` (which pulls a nested `ms@2.1.2`), `ms` and
+/// `once` (which pulls `wrappy`), with the dev Dependency `@types/ms`; its
+/// Workspace member `packages/ui` depends on `inherits`, with the dev
+/// Dependency `wrappy`.
+const YARN_FIXTURES: [&str; 2] = ["yarn-v1", "yarn-berry"];
+
+#[test]
+fn yarn_lockfile_is_an_inventory_source_with_workspace_members_as_roots() {
+    for fixture in YARN_FIXTURES {
+        let lines = verdict_lines(
+            Project::from_fixture(fixture)
+                .with_policy(DENY_ALL)
+                .check()
+                .code(1),
+        );
+        assert_eq!(
+            lines,
+            [
+                "DENY    MIT             debug@4.3.4  via app > debug",
+                "DENY    ISC             inherits@2.0.4  via ui > inherits",
+                "DENY    MIT             ms@2.1.2  via app > debug > ms",
+                "DENY    MIT             ms@2.1.3  via app > ms",
+                "DENY    ISC             once@1.4.0  via app > once",
+                // `ui > wrappy` is shorter, but `dev`.
+                "DENY    ISC             wrappy@1.0.2  via app > once > wrappy",
+            ],
+            "{fixture}"
+        );
+    }
+}
+
+#[test]
+fn yarn_dependency_reached_only_through_dev_dependencies_is_dev() {
+    for fixture in YARN_FIXTURES {
+        let project = Project::from_fixture(fixture).with_policy(DENY_ALL);
+        project
+            .check()
+            .code(1)
+            .stdout(predicate::str::contains("6 packages (npm)"))
+            .stdout(predicate::str::contains("@types/ms").not());
+        let json = stdout_json(
+            project
+                .list_with(&["--format", "json", "--include-dev"])
+                .success(),
+        );
+        let types = json_package(&json["packages"], "@types/ms", "0.7.34");
+        assert_eq!(types["scope"], "dev", "{fixture}");
+        assert_eq!(
+            types["introduction_path"],
+            serde_json::json!(["app", "@types/ms"]),
+            "{fixture}"
+        );
+        // Also a dev Dependency of `ui`, but reached through `app > once`.
+        let wrappy = json_package(&json["packages"], "wrappy", "1.0.2");
+        assert_eq!(wrappy["scope"], "prod", "{fixture}");
+    }
+}
+
+#[test]
+fn yarn_package_without_an_installed_copy_of_its_version_is_unresolved() {
+    for fixture in YARN_FIXTURES {
+        let json = stdout_json(
+            Project::from_fixture(fixture)
+                .with_policy(DENY_ALL)
+                .replace_in(
+                    "node_modules/once/package.json",
+                    r#""version": "1.4.0""#,
+                    r#""version": "1.3.3""#,
+                )
+                .remove("node_modules/wrappy")
+                .list_with(&["--format", "json"])
+                .success(),
+        );
+        for name in ["once", "wrappy"] {
+            let package = json_package(
+                &json["packages"],
+                name,
+                if name == "once" { "1.4.0" } else { "1.0.2" },
+            );
+            assert_eq!(
+                package["declared_license"],
+                serde_json::Value::Null,
+                "{fixture}"
+            );
+            assert_eq!(package["reason"], "unresolved", "{fixture}");
+            assert_eq!(package["origin"], serde_json::Value::Null, "{fixture}");
+        }
+        let ms = json_package(&json["packages"], "ms", "2.1.2");
+        assert_eq!(ms["declared_license"], "MIT", "{fixture}");
+        assert_eq!(ms["origin"], "installed", "{fixture}");
+    }
+}
+
+#[test]
+fn yarn_installed_copy_in_a_workspace_member_is_a_license_origin() {
+    for fixture in YARN_FIXTURES {
+        Project::from_fixture(fixture)
+            .with_policy(DENY_ALL)
+            .remove("node_modules/inherits")
+            .write(
+                "packages/ui/node_modules/inherits/package.json",
+                r#"{ "name": "inherits", "version": "2.0.4", "license": "MIT" }"#,
+            )
+            .check()
+            .code(1)
+            .stdout(predicate::str::contains(
+                "DENY    MIT             inherits@2.0.4  via ui > inherits",
+            ));
+    }
+}
+
+#[test]
+fn yarn_berry_project_in_plug_n_play_mode_is_unresolved_until_the_registry_is_an_origin() {
+    Project::from_fixture("yarn-berry")
+        .with_policy(DENY_ALL)
+        .remove("node_modules")
+        .write(".pnp.cjs", "")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("6 packages (npm)"))
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    ms@2.1.3  via app > ms",
+        ))
+        .stdout(predicate::str::contains("6 deny · 0 review · 0 allow"));
+}
+
+#[test]
+fn yarn_lockfile_in_no_known_format_is_a_runtime_error() {
+    let not_yarn = "hello: world\n";
+    let bad_v1 = "# yarn lockfile v1\n\nms@^2.1.3:\n      version \"2.1.3\"\n";
+    let bad_berry = "__metadata:\n  version: 10\n\n\"ms@npm:^2.1.3\":\n  resolution: [\n";
+    for (contents, reason) in [
+        (
+            not_yarn,
+            "neither the `# yarn lockfile v1` header nor a `__metadata` key",
+        ),
+        (bad_v1, "line 4: unexpected indentation"),
+        (bad_berry, ""),
+    ] {
+        Project::from_fixture("yarn-v1")
+            .with_policy(DENY_ALL)
+            .write("yarn.lock", contents)
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "yarn.lock is not a Yarn lockfile licguard can read",
+            ))
+            .stderr(predicate::str::contains(reason))
+            .stderr(predicate::str::contains(
+                "hint: regenerate it with `yarn install`",
+            ));
+    }
+}
+
+#[test]
+fn yarn_lockfile_without_its_package_json_is_a_runtime_error() {
+    for (fixture, manifest) in [
+        ("yarn-v1", "package.json"),
+        ("yarn-berry", "packages/ui/package.json"),
+    ] {
+        Project::from_fixture(fixture)
+            .with_policy(DENY_ALL)
+            .remove(manifest)
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains("cannot read"))
+            .stderr(predicate::str::contains(manifest))
+            .stderr(predicate::str::contains("hint:"));
+    }
+}
+
+#[test]
+fn yarn_v1_workspace_pattern_other_than_dir_star_is_a_runtime_error() {
+    Project::from_fixture("yarn-v1")
+        .with_policy(DENY_ALL)
+        .replace_in("package.json", r#""packages/*""#, r#""packages/**""#)
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("workspace pattern `packages/**`"))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn yarn_v1_workspace_members_can_be_listed_as_directories_or_in_an_object() {
+    for workspaces in [r#"["packages/ui"]"#, r#"{ "packages": ["./packages/*/"] }"#] {
+        Project::from_fixture("yarn-v1")
+            .with_policy(DENY_ALL)
+            .replace_in("package.json", r#"["packages/*"]"#, workspaces)
+            .check()
+            .code(1)
+            .stdout(predicate::str::contains(
+                "DENY    ISC             inherits@2.0.4  via ui > inherits",
+            ));
+    }
+}
+
+#[test]
+fn yarn_lockfile_is_aggregated_with_the_other_inventory_sources() {
+    Project::from_fixture("yarn-v1")
+        .with_policy(DENY_GPL)
+        .write("tools/other/package-lock.json", GPL_LOCKFILE)
+        // Neither is an Inventory source.
+        .write("node_modules/once/yarn.lock", "not a lockfile")
+        .write(".cache/yarn.lock", "not a lockfile")
+        .list_with(&[])
+        .success()
+        .stdout(format!(
+            "licguard {} — 7 packages (npm)\n\n\
+             ALLOW  MIT           debug@4.3.4     listed  installed  via app > debug          in yarn.lock\n\
+             DENY   GPL-3.0-only  gpl-lib@1.0.0   listed  lockfile   via other > gpl-lib      in tools/other/package-lock.json\n\
+             ALLOW  ISC           inherits@2.0.4  listed  installed  via ui > inherits        in yarn.lock\n\
+             ALLOW  MIT           ms@2.1.2        listed  installed  via app > debug > ms     in yarn.lock\n\
+             ALLOW  MIT           ms@2.1.3        listed  installed  via app > ms             in yarn.lock\n\
+             ALLOW  ISC           once@1.4.0      listed  installed  via app > once           in yarn.lock\n\
+             ALLOW  ISC           wrappy@1.0.2    listed  installed  via app > once > wrappy  in yarn.lock\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
 /// `npm-basic` with one Package per Verdict reason and License origin, under
 /// [`DENY_ISC`]: `debug` is clarified, `ms@2.1.3` is Unresolved, `wrappy` is
 /// not installed.
@@ -2603,7 +2836,9 @@ fn list_exits_2_only_on_a_runtime_error() {
         .list_with(&[])
         .code(2)
         .stdout("")
-        .stderr(predicate::str::contains("no package-lock.json found under"))
+        .stderr(predicate::str::contains(
+            "no package-lock.json or yarn.lock found under",
+        ))
         .stderr(predicate::str::contains("hint:"));
 }
 

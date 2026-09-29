@@ -1,0 +1,1 @@
+{"name":"app","version":"1.0.0","private":true,"workspaces":["packages/*"],"dependencies":{"debug":"4.3.4","ms":"^2.1.3","once":"^1.4.0"},"devDependencies":{"@types/ms":"^0.7.34"}}
