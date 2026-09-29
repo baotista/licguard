@@ -86,7 +86,6 @@ enum Command {
 enum CheckFormat {
     Text,
     Json,
-    /// GitHub Actions annotations and job summary
     Github,
 }
 
