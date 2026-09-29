@@ -68,13 +68,15 @@ The goal: no **Violation** reaches a Project's main branch unless it is covered 
 
 npm lockfiles contain the full tree and dev markers, so they are parsed natively without running npm. The `license` field is sometimes missing, legacy (`licenses` array) or not SPDX.
 
+`yarn.lock` (v1 text format, or Berry YAML recognised by its `__metadata` key) is also parsed natively, but records neither dev markers nor licenses. Its Scope is derived from the graph: `prod` is everything reachable from the `dependencies`, `optionalDependencies` and `peerDependencies` of the root `package.json` and of each Workspace member, `dev` everything else reachable only through a `devDependencies` edge. Yarn v1 Workspace members come from the root `workspaces` field, of which only plain directories and `dir/*` patterns are supported; Berry ones are its `workspace:` entries.
+
 Maven and Gradle have no reliable standard lockfile; licguard never reimplements their dependency mediation and relies on CycloneDX SBOMs first. Java licenses are often expressed by name and URL ("The Apache Software License, Version 2.0") and need a mapping table to SPDX. Java scopes `test` and `provided` map to the `dev` **Scope**.
 
 ## Functional requirements
 
 | ID | Requirement | Priority |
 | --- | --- | --- |
-| F-01 | Detect **Inventory sources** at the Project root and in subdirectories; treat npm workspaces as **Workspace members** | P0 |
+| F-01 | Detect **Inventory sources** at the Project root and in subdirectories; treat npm and Yarn workspaces as **Workspace members** | P0 |
 | F-02 | Parse `package-lock.json` v2/v3: name, version, Scope, Introduction paths | P0 |
 | F-03 | Resolve licenses through **License origins** in priority order (see below) | P0 |
 | F-04 | Normalize **Declared licenses** to SPDX expressions, including legacy forms and common aliases | P0 |
@@ -161,7 +163,7 @@ In priority order:
 
 1. License clarification.
 2. Installed package (`node_modules`), **only if its version matches the Inventory source exactly**; a mismatching copy is skipped (Warning in `--verbose`: "run `npm install`").
-3. The Inventory source itself, when it records licenses (npm v2/v3 lockfiles copy each entry's `license` from the registry at install time).
+3. The Inventory source itself, when it records licenses (npm v2/v3 lockfiles copy each entry's `license` from the registry at install time). `yarn.lock` records none, so a Yarn Package's only local origin is its installed copy, anywhere under the `node_modules` of the lockfile's directory or of a Workspace member. A Berry Project in Plug'n'Play mode has no `node_modules`: its Packages stay Unresolved until the registry origin is available.
 4. Cache.
 5. Registry.
 
@@ -246,7 +248,7 @@ flowchart LR
 | Need | Crate |
 | --- | --- |
 | CLI arguments | `clap` (derive) |
-| Serialization | `serde`, `serde_json`, `toml`, `serde_yaml` |
+| Serialization | `serde`, `serde_json`, `toml`, `serde_yaml_ng` |
 | SPDX expressions | `spdx` |
 | Text detection (P2) | `askalono` |
 | Concurrent HTTP | `reqwest`, `tokio` |

@@ -7,11 +7,10 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
-use super::{Ecosystem, LicenseOrigin, LicensedPackage, Package, Scope};
+use super::{Ecosystem, LicenseOrigin, LicensedPackage, Package, Scope, paths};
 
-mod paths;
-
-const LOCKFILE: &str = "package-lock.json";
+/// The file name of an npm Inventory source.
+pub const LOCKFILE: &str = "package-lock.json";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,40 +50,6 @@ struct InstalledManifest {
     licenses: Option<serde_json::Value>,
 }
 
-/// Finds the Project's npm Inventory sources: every `package-lock.json` under
-/// `project`, skipping `node_modules` and hidden directories. Returns their
-/// paths relative to `project`, joined with `/`, sorted.
-pub fn lockfiles(project: &Path) -> Result<Vec<String>> {
-    let mut found = Vec::new();
-    find_lockfiles(project, "", &mut found)?;
-    if found.is_empty() {
-        bail!(
-            "no {LOCKFILE} found under {}\nhint: run licguard at the root of an npm Project, or run `npm install` to create the lockfile",
-            project.display()
-        );
-    }
-    found.sort();
-    Ok(found)
-}
-
-fn find_lockfiles(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result<()> {
-    let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
-    for entry in entries {
-        let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let path = format!("{relative}{name}");
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("cannot read {}", entry.path().display()))?;
-        if file_type.is_file() && name == LOCKFILE {
-            found.push(path);
-        } else if file_type.is_dir() && name != "node_modules" && !name.starts_with('.') {
-            find_lockfiles(&entry.path(), &format!("{path}/"), found)?;
-        }
-    }
-    Ok(())
-}
-
 /// Reads the `package-lock.json` at `source`, relative to `project`, and
 /// returns its Packages with their Declared license, taken from the first
 /// License origin that has one: the installed copy next to the lockfile (only
@@ -122,7 +87,9 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             .filter(|(key, _)| is_workspace_member(key))
             .map(|(key, entry)| (key.clone(), workspace_member_name(key, entry))),
     );
-    let introduction_paths = paths::shortest(&lockfile.packages, &roots);
+    let introduction_paths = paths::shortest(&roots, |key: &String, prod_only| {
+        children(&lockfile.packages, key, prod_only)
+    });
 
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for (key, entry) in &lockfile.packages {
@@ -151,7 +118,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             declared_license,
             license_origin,
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
-            introduction_path: introduction_paths.get(key).cloned(),
+            introduction_path: introduction_paths.get(key).map(|(path, _)| path.clone()),
             sources: vec![source.to_string()],
             package: package.clone(),
         };
@@ -164,6 +131,59 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         }
     }
     Ok(packages.into_values().collect())
+}
+
+/// The dependencies of the entry at `key`, as `(name, key)` pairs: `link`
+/// entries are not followed, and with `prod_only`, neither `devDependencies`
+/// nor `dev` entries.
+fn children(
+    packages: &BTreeMap<String, LockEntry>,
+    key: &str,
+    prod_only: bool,
+) -> Vec<(String, String)> {
+    let Some(entry) = packages.get(key) else {
+        return Vec::new();
+    };
+    let dev_dependencies = (!prod_only).then_some(&entry.dev_dependencies);
+    [
+        Some(&entry.dependencies),
+        dev_dependencies,
+        Some(&entry.optional_dependencies),
+        Some(&entry.peer_dependencies),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|deps| deps.keys())
+    .filter_map(|name| {
+        let child = resolve(packages, key, name)?;
+        let child_entry = &packages[&child];
+        let skipped = child_entry.link || (prod_only && child_entry.dev);
+        (!skipped).then(|| (name.clone(), child))
+    })
+    .collect()
+}
+
+/// Finds the entry that `name` resolves to when required from the entry at
+/// `from`, the way Node does: `<from>/node_modules/<name>`, then the same in
+/// each parent `node_modules` level, up to `node_modules/<name>`.
+fn resolve(packages: &BTreeMap<String, LockEntry>, from: &str, name: &str) -> Option<String> {
+    let mut dir = from;
+    loop {
+        let candidate = if dir.is_empty() {
+            format!("node_modules/{name}")
+        } else {
+            format!("{dir}/node_modules/{name}")
+        };
+        if packages.contains_key(&candidate) {
+            return Some(candidate);
+        }
+        if dir.is_empty() {
+            return None;
+        }
+        dir = dir
+            .rsplit_once("/node_modules/")
+            .map_or("", |(parent, _)| parent);
+    }
 }
 
 /// `node_modules/debug/node_modules/ms` -> `ms`; `node_modules/@types/ms` -> `@types/ms`.
@@ -185,12 +205,12 @@ fn workspace_member_name(key: &str, entry: &LockEntry) -> String {
         .unwrap_or_else(|| key.rsplit('/').next().unwrap_or(key).to_string())
 }
 
-fn directory_name(root: &Path) -> Option<String> {
+pub(super) fn directory_name(root: &Path) -> Option<String> {
     let root = fs::canonicalize(root).ok()?;
     Some(root.file_name()?.to_string_lossy().into_owned())
 }
 
-fn installed_license(dir: &Path, version: &str) -> Option<String> {
+pub(super) fn installed_license(dir: &Path, version: &str) -> Option<String> {
     let text = fs::read_to_string(dir.join("package.json")).ok()?;
     let manifest: InstalledManifest = serde_json::from_str(&text).ok()?;
     if manifest.version.as_deref() != Some(version) {
