@@ -93,8 +93,9 @@ enum Node {
 /// `dependencies`, `optionalDependencies` or `peerDependencies`, `dev` when
 /// only through a `devDependencies` edge of a root, and `prod` when no root
 /// reaches it. The lockfile records no licenses: the only License origin is
-/// the installed copy, under the `node_modules` of the lockfile's directory
-/// or of a Workspace member, when its version matches.
+/// the installed copy, anywhere under the `node_modules` of the lockfile's
+/// directory or of a Workspace member (nested copies included), when its
+/// version matches.
 pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
     let path = project.join(source);
     let root = path.parent().unwrap_or(project);
