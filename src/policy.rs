@@ -7,6 +7,7 @@ use serde::Deserialize;
 use spdx::expression::{ExprNode, Operator};
 use spdx::{LicenseItem, LicenseReq};
 
+use crate::clarification::Clarification;
 use crate::normalize;
 
 const CONFIG: &str = "licguard.toml";
@@ -52,6 +53,8 @@ impl Verdict {
 #[serde(deny_unknown_fields)]
 struct Config {
     policy: Policy,
+    #[serde(default)]
+    clarifications: Vec<Clarification>,
 }
 
 #[derive(Deserialize)]
@@ -70,6 +73,9 @@ pub struct Policy {
     /// Whether `dev` Dependencies are evaluated too.
     #[serde(default)]
     pub include_dev: bool,
+    /// The `[[clarifications]]` entries, which sit beside `[policy]`.
+    #[serde(skip)]
+    pub clarifications: Vec<Clarification>,
 }
 
 fn default_unresolved() -> Verdict {
@@ -92,6 +98,7 @@ impl Policy {
         let config: Config =
             toml::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
         let mut policy = config.policy;
+        policy.clarifications = config.clarifications;
         let mut seen: HashMap<String, &str> = HashMap::new();
         for (list, entries) in [
             ("allow", &mut policy.allow),
@@ -112,6 +119,27 @@ impl Policy {
                     );
                 }
                 *entry = id;
+            }
+        }
+        let mut clarified: HashMap<(String, Option<String>), usize> = HashMap::new();
+        for (i, clarification) in policy.clarifications.iter_mut().enumerate() {
+            let number = i + 1;
+            let package = match clarification.package.trim() {
+                "" => String::new(),
+                name => format!(" (`{name}`)"),
+            };
+            if let Err(err) = clarification.validate() {
+                bail!(
+                    "{}: clarification #{number}{package}: {err}",
+                    path.display()
+                );
+            }
+            let key = (clarification.package.clone(), clarification.version.clone());
+            if let Some(first) = clarified.insert(key, number) {
+                bail!(
+                    "{}: clarification #{number}{package}: same package and version as clarification #{first}\nhint: keep exactly one of them",
+                    path.display()
+                );
             }
         }
         Ok(policy)
@@ -197,7 +225,7 @@ impl Policy {
 /// Strict SPDX parsing, except that deprecated identifiers (e.g. `eCos-2.0`)
 /// are accepted: Normalized licenses keep those that have no current
 /// equivalent.
-fn parse(expression: &str) -> Result<spdx::Expression, spdx::ParseError> {
+pub fn parse(expression: &str) -> Result<spdx::Expression, spdx::ParseError> {
     spdx::Expression::parse_mode(
         expression,
         spdx::ParseMode {

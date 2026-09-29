@@ -2,11 +2,14 @@ use std::fmt::Write;
 
 use crate::inventory::Package;
 use crate::policy::{Reason, Verdict};
+use crate::warning::Warning;
 
 pub struct Evaluated {
     pub package: Package,
     /// The Normalized license; `None` when Unresolved.
     pub license: Option<String>,
+    /// Whether the license comes from a License clarification.
+    pub clarified: bool,
     pub verdict: Verdict,
     pub reason: Reason,
     /// See [`crate::policy::Outcome::elected`].
@@ -15,8 +18,9 @@ pub struct Evaluated {
     pub introduction_path: Option<Vec<String>>,
 }
 
-/// Renders the terminal report. Expects `evaluated` already sorted.
-pub fn text(evaluated: &[Evaluated], violated: bool) -> String {
+/// Renders the terminal report. Expects `evaluated` and `warnings` already
+/// sorted.
+pub fn text(evaluated: &[Evaluated], warnings: &[Warning], violated: bool) -> String {
     let mut out = String::new();
     let ecosystems: std::collections::BTreeSet<String> = evaluated
         .iter()
@@ -48,6 +52,9 @@ pub fn text(evaluated: &[Evaluated], violated: bool) -> String {
             .or(e.license.as_deref())
             .unwrap_or("(unresolved)");
         let mut notes = Vec::new();
+        if e.clarified {
+            notes.push("clarified".to_string());
+        }
         if e.reason == Reason::Unlisted {
             notes.push("unlisted".to_string());
         }
@@ -71,6 +78,12 @@ pub fn text(evaluated: &[Evaluated], violated: bool) -> String {
         .unwrap();
     }
     if !flagged.is_empty() {
+        out.push('\n');
+    }
+    for warning in warnings {
+        writeln!(out, "warning: {warning}").unwrap();
+    }
+    if !warnings.is_empty() {
         out.push('\n');
     }
 
