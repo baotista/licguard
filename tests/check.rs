@@ -260,12 +260,12 @@ fn packages_are_listed_by_verdict_then_name_in_stable_order() {
     assert_eq!(
         lines,
         [
-            "DENY    ISC             once@1.4.0",
-            "DENY    ISC             wrappy@1.0.2",
-            "REVIEW  MIT             @types/ms@0.7.34  (unlisted)",
-            "REVIEW  MIT             debug@4.3.4  (unlisted)",
-            "REVIEW  MIT             ms@2.1.2  (unlisted)",
-            "REVIEW  MIT             ms@2.1.3  (unlisted)",
+            "DENY    ISC             once@1.4.0  via app > once",
+            "DENY    ISC             wrappy@1.0.2  via app > once > wrappy",
+            "REVIEW  MIT             @types/ms@0.7.34  via app > @types/ms  (unlisted)",
+            "REVIEW  MIT             debug@4.3.4  via app > debug  (unlisted)",
+            "REVIEW  MIT             ms@2.1.2  via app > debug > ms  (unlisted)",
+            "REVIEW  MIT             ms@2.1.3  via app > ms  (unlisted)",
         ]
     );
 }
@@ -375,7 +375,7 @@ fn license_in_review_list_is_reviewed_without_failing() {
         .check()
         .success()
         .stdout(predicate::str::contains(
-            "REVIEW  ISC             once@1.4.0\n",
+            "REVIEW  ISC             once@1.4.0  via app > once\n",
         ))
         .stdout(predicate::str::contains("0 deny · 2 review · 4 allow"));
 }
@@ -387,7 +387,7 @@ fn strict_mode_makes_reviewed_licenses_violations() {
         .check_with(&["--strict"])
         .code(1)
         .stdout(predicate::str::contains(
-            "REVIEW  ISC             once@1.4.0\n",
+            "REVIEW  ISC             once@1.4.0  via app > once\n",
         ))
         .stdout(predicate::str::contains("✗ Policy violated (exit 1)"));
 }
@@ -445,7 +445,7 @@ fn unlisted_verdict_reason_is_shown() {
         .check()
         .success()
         .stdout(predicate::str::contains(
-            "REVIEW  ISC             once@1.4.0  (unlisted)\n",
+            "REVIEW  ISC             once@1.4.0  via app > once  (unlisted)\n",
         ));
 }
 
@@ -510,7 +510,7 @@ fn elected_license_of_an_or_expression_is_shown() {
         .check()
         .success()
         .stdout(predicate::str::contains(
-            "REVIEW  MPL-2.0         ms@2.1.3  (elected from GPL-3.0-only OR MPL-2.0)\n",
+            "REVIEW  MPL-2.0         ms@2.1.3  via app > ms  (elected from GPL-3.0-only OR MPL-2.0)\n",
         ));
 }
 
@@ -528,7 +528,7 @@ fn or_expression_elects_the_first_option_on_ties() {
         .check()
         .success()
         .stdout(predicate::str::contains(
-            "REVIEW  EPL-2.0         ms@2.1.3  (elected from EPL-2.0 OR MPL-2.0)\n",
+            "REVIEW  EPL-2.0         ms@2.1.3  via app > ms  (elected from EPL-2.0 OR MPL-2.0)\n",
         ));
 }
 
@@ -562,7 +562,7 @@ fn with_expression_not_listed_takes_the_base_license_verdict() {
         .check()
         .code(1)
         .stdout(predicate::str::contains(
-            "DENY    GPL-2.0-only WITH Classpath-exception-2.0 ms@2.1.3\n",
+            "DENY    GPL-2.0-only WITH Classpath-exception-2.0 ms@2.1.3  via app > ms\n",
         ));
 }
 
@@ -580,7 +580,7 @@ fn gnu_or_later_license_takes_its_base_version_verdict() {
         .check()
         .code(1)
         .stdout(predicate::str::contains(
-            "DENY    GPL-2.0-or-later ms@2.1.3\n",
+            "DENY    GPL-2.0-or-later ms@2.1.3  via app > ms\n",
         ));
 }
 
@@ -598,7 +598,7 @@ fn plus_or_later_license_takes_its_base_version_verdict() {
         .check()
         .code(1)
         .stdout(predicate::str::contains(
-            "DENY    Apache-2.0+     ms@2.1.3\n",
+            "DENY    Apache-2.0+     ms@2.1.3  via app > ms\n",
         ));
 }
 
@@ -659,6 +659,219 @@ fn deprecated_license_identifiers_are_still_understood() {
         .check()
         .code(1)
         .stdout(predicate::str::contains(
-            "DENY    GPL-3.0         ms@2.1.3\n",
+            "DENY    GPL-3.0         ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn each_reported_package_shows_its_introduction_path() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_MIT)
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT             ms@2.1.3  via app > ms\n",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    MIT             ms@2.1.2  via app > debug > ms\n",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    MIT             @types/ms@0.7.34  via app > @types/ms\n",
+        ));
+}
+
+#[test]
+fn introduction_path_is_the_shortest_then_first_in_name_order() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            // `once > wrappy` is longer than the direct `wrappy`.
+            packages[""]["dependencies"]["wrappy"] = "^1.0.2".into();
+            // `shared` is reached through both `once` and `debug`.
+            packages["node_modules/shared"] = serde_json::json!({
+                "version": "1.0.0",
+                "license": "ISC",
+            });
+            packages["node_modules/once"]["dependencies"]["shared"] = "1".into();
+            packages["node_modules/debug"]["dependencies"]["shared"] = "1".into();
+        });
+    let first = project.check().code(1).get_output().stdout.clone();
+    let second = project.check().code(1).get_output().stdout.clone();
+    assert_eq!(first, second);
+
+    let stdout = String::from_utf8(first).unwrap();
+    assert!(stdout.contains("DENY    ISC             wrappy@1.0.2  via app > wrappy\n"));
+    assert!(stdout.contains("DENY    ISC             shared@1.0.0  via app > debug > shared\n"));
+}
+
+const DENY_GPL: &str = r#"
+    [policy]
+    allow = ["MIT", "ISC"]
+    deny = ["GPL-3.0-only"]
+"#;
+
+/// Adds the `dev` Dependency `test-kit@1.0.0`, licensed `GPL-3.0-only`.
+fn add_dev_dependency(packages: &mut serde_json::Value) {
+    packages[""]["devDependencies"] = serde_json::json!({ "test-kit": "^1.0.0" });
+    packages["node_modules/test-kit"] = serde_json::json!({
+        "version": "1.0.0",
+        "dev": true,
+        "license": "GPL-3.0-only",
+    });
+}
+
+#[test]
+fn dev_dependencies_are_excluded_by_default() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_GPL)
+        .edit_lockfile(add_dev_dependency)
+        .check()
+        .success()
+        .stdout(predicate::str::contains("6 packages (npm)"))
+        .stdout(predicate::str::contains("test-kit").not())
+        .stdout(predicate::str::contains("0 deny · 0 review · 6 allow"));
+}
+
+#[test]
+fn include_dev_option_includes_dev_dependencies() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_GPL)
+        .edit_lockfile(add_dev_dependency)
+        .check_with(&["--include-dev"])
+        .code(1)
+        .stdout(predicate::str::contains("7 packages (npm)"))
+        .stdout(predicate::str::contains(
+            "DENY    GPL-3.0-only    test-kit@1.0.0  via app > test-kit\n",
+        ))
+        .stdout(predicate::str::contains("1 deny · 0 review · 6 allow"));
+}
+
+#[test]
+fn include_dev_setting_includes_dev_dependencies() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_GPL}include_dev = true\n"))
+        .edit_lockfile(add_dev_dependency)
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("7 packages (npm)"))
+        .stdout(predicate::str::contains(
+            "DENY    GPL-3.0-only    test-kit@1.0.0  via app > test-kit\n",
+        ));
+}
+
+#[test]
+fn prod_dependency_path_goes_through_prod_packages_only() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            // `app > a-test-kit > wrappy` comes first in name order, but is dev.
+            packages[""]["devDependencies"] = serde_json::json!({ "a-test-kit": "^1.0.0" });
+            packages["node_modules/a-test-kit"] = serde_json::json!({
+                "version": "1.0.0",
+                "dev": true,
+                "license": "MIT",
+                "dependencies": { "wrappy": "1" },
+            });
+        })
+        .check_with(&["--include-dev"])
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             wrappy@1.0.2  via app > once > wrappy\n",
+        ));
+}
+
+#[test]
+fn prod_dependency_path_does_not_start_with_a_root_dev_dependency() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            packages[""]["devDependencies"] = serde_json::json!({ "wrappy": "^1.0.2" });
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             wrappy@1.0.2  via app > once > wrappy\n",
+        ));
+}
+
+#[test]
+fn dev_optional_and_optional_dependencies_are_prod() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_GPL)
+        .edit_lockfile(|packages| {
+            // Also reached through a prod path, so npm flags it `devOptional`.
+            packages[""]["devDependencies"] = serde_json::json!({ "fsevents": "^2.3.3" });
+            packages[""]["optionalDependencies"] = serde_json::json!({ "fsevents": "^2.3.3" });
+            packages["node_modules/fsevents"] = serde_json::json!({
+                "version": "2.3.3",
+                "devOptional": true,
+                "license": "GPL-3.0-only",
+            });
+            packages["node_modules/once"]["optionalDependencies"] =
+                serde_json::json!({ "native-once": "1" });
+            packages["node_modules/native-once"] = serde_json::json!({
+                "version": "1.0.0",
+                "optional": true,
+                "license": "GPL-3.0-only",
+            });
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("8 packages (npm)"))
+        .stdout(predicate::str::contains(
+            "DENY    GPL-3.0-only    fsevents@2.3.3  via app > fsevents\n",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    GPL-3.0-only    native-once@1.0.0  via app > once > native-once\n",
+        ));
+}
+
+#[test]
+fn project_root_without_a_name_is_shown_by_its_directory_name() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            packages[""].as_object_mut().unwrap().remove("name");
+        });
+    let directory = project
+        .path()
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    project
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(format!(
+            "DENY    ISC             once@1.4.0  via {directory} > once\n"
+        )));
+}
+
+#[test]
+fn dependency_resolves_to_the_nearest_copy_up_the_node_modules_tree() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            packages[""]["dependencies"]["helper"] = "^1.0.0".into();
+            packages["node_modules/helper"] = serde_json::json!({
+                "version": "1.0.0",
+                "license": "ISC",
+            });
+            // `debug > ms` requires `helper@2`, installed next to it.
+            packages["node_modules/debug/node_modules/ms"]["dependencies"] =
+                serde_json::json!({ "helper": "2" });
+            packages["node_modules/debug/node_modules/helper"] = serde_json::json!({
+                "version": "2.0.0",
+                "license": "ISC",
+            });
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             helper@1.0.0  via app > helper\n",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    ISC             helper@2.0.0  via app > debug > ms > helper\n",
         ));
 }

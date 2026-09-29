@@ -65,6 +65,9 @@ pub struct Policy {
     unresolved: Verdict,
     #[serde(default = "default_unlisted")]
     unlisted: Verdict,
+    /// Whether `dev` Dependencies are evaluated too.
+    #[serde(default)]
+    pub include_dev: bool,
 }
 
 fn default_unresolved() -> Verdict {
