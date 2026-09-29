@@ -6,12 +6,32 @@ use serde::Deserialize;
 
 const CONFIG: &str = "licguard.toml";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Verdict {
     // Declared most severe first, so sorting puts Violations on top.
     Deny,
     Review,
     Allow,
+}
+
+/// Why a Package received its Verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    Listed,
+    Unresolved,
+    Unlisted,
+}
+
+impl Verdict {
+    /// Whether this Verdict fails the gate: `deny`, or `review` in strict mode.
+    pub fn is_violation(self, strict: bool) -> bool {
+        match self {
+            Verdict::Deny => true,
+            Verdict::Review => strict,
+            Verdict::Allow => false,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -26,7 +46,21 @@ pub struct Policy {
     #[serde(default)]
     allow: Vec<String>,
     #[serde(default)]
+    review: Vec<String>,
+    #[serde(default)]
     deny: Vec<String>,
+    #[serde(default = "default_unresolved")]
+    unresolved: Verdict,
+    #[serde(default = "default_unlisted")]
+    unlisted: Verdict,
+}
+
+fn default_unresolved() -> Verdict {
+    Verdict::Deny
+}
+
+fn default_unlisted() -> Verdict {
+    Verdict::Review
 }
 
 impl Policy {
@@ -41,7 +75,12 @@ impl Policy {
         let config: Config =
             toml::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
         let policy = config.policy;
-        for id in policy.allow.iter().chain(&policy.deny) {
+        for id in policy
+            .allow
+            .iter()
+            .chain(&policy.review)
+            .chain(&policy.deny)
+        {
             if spdx_id(id).is_none() {
                 bail!(
                     "{}: `{id}` is not an SPDX license identifier\nhint: see https://spdx.org/licenses/",
@@ -53,15 +92,14 @@ impl Policy {
     }
 
     /// Verdict for a Normalized license; `None` means the license is Unresolved.
-    ///
-    /// Until the Policy exposes `unresolved` and `unlisted` settings, their
-    /// defaults apply: Unresolved licenses are denied, Unlisted ones reviewed.
-    pub fn evaluate(&self, license: Option<&str>) -> Verdict {
+    pub fn evaluate(&self, license: Option<&str>) -> (Verdict, Reason) {
+        let listed = |list: &[String], id| list.iter().any(|l| l == id);
         match license {
-            None => Verdict::Deny,
-            Some(id) if self.deny.iter().any(|d| d == id) => Verdict::Deny,
-            Some(id) if self.allow.iter().any(|a| a == id) => Verdict::Allow,
-            Some(_) => Verdict::Review,
+            None => (self.unresolved, Reason::Unresolved),
+            Some(id) if listed(&self.deny, id) => (Verdict::Deny, Reason::Listed),
+            Some(id) if listed(&self.review, id) => (Verdict::Review, Reason::Listed),
+            Some(id) if listed(&self.allow, id) => (Verdict::Allow, Reason::Listed),
+            Some(_) => (self.unlisted, Reason::Unlisted),
         }
     }
 }

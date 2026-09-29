@@ -1,17 +1,18 @@
 use std::fmt::Write;
 
 use crate::inventory::Package;
-use crate::policy::Verdict;
+use crate::policy::{Reason, Verdict};
 
 pub struct Evaluated {
     pub package: Package,
     /// The Normalized license; `None` when Unresolved.
     pub license: Option<String>,
     pub verdict: Verdict,
+    pub reason: Reason,
 }
 
 /// Renders the terminal report. Expects `evaluated` already sorted.
-pub fn text(evaluated: &[Evaluated]) -> String {
+pub fn text(evaluated: &[Evaluated], violated: bool) -> String {
     let mut out = String::new();
     let ecosystems: std::collections::BTreeSet<String> = evaluated
         .iter()
@@ -36,10 +37,15 @@ pub fn text(evaluated: &[Evaluated]) -> String {
             Verdict::Review => "REVIEW",
             Verdict::Allow => unreachable!(),
         };
+        // An Unresolved license already shows its reason in the license column.
         let license = e.license.as_deref().unwrap_or("(unresolved)");
+        let reason = match e.reason {
+            Reason::Unlisted => "  (unlisted)",
+            Reason::Listed | Reason::Unresolved => "",
+        };
         writeln!(
             out,
-            "{verdict:<7} {license:<15} {}@{}",
+            "{verdict:<7} {license:<15} {}@{}{reason}",
             e.package.name, e.package.version
         )
         .unwrap();
@@ -55,7 +61,7 @@ pub fn text(evaluated: &[Evaluated]) -> String {
         count(Verdict::Allow),
     );
     writeln!(out, "{deny} deny · {review} review · {allow} allow").unwrap();
-    if deny > 0 {
+    if violated {
         writeln!(out, "✗ Policy violated (exit 1)").unwrap();
     } else {
         writeln!(out, "✓ Policy respected").unwrap();
