@@ -61,6 +61,8 @@ impl std::fmt::Display for Ecosystem {
 pub struct LicensedPackage {
     pub package: Package,
     pub declared_license: Option<String>,
+    /// Where the Declared license came from; `None` when there is none.
+    pub license_origin: Option<LicenseOrigin>,
     pub scope: Scope,
     /// Package names from a root (the Project root or a Workspace member) to
     /// this Package; `None` when it is not reachable from any root.
@@ -82,6 +84,7 @@ impl LicensedPackage {
         }
         if self.declared_license.is_none() {
             self.declared_license = other.declared_license;
+            self.license_origin = other.license_origin;
         }
         let length = |path: &Option<Vec<String>>| path.as_ref().map_or(usize::MAX, Vec::len);
         if self.scope == Scope::Dev && other.scope == Scope::Prod {
@@ -102,4 +105,33 @@ impl LicensedPackage {
 pub enum Scope {
     Prod,
     Dev,
+}
+
+impl Scope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Prod => "prod",
+            Scope::Dev => "dev",
+        }
+    }
+}
+
+/// Where a Package's license information came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LicenseOrigin {
+    Clarification,
+    /// The installed copy of the Package, e.g. its `node_modules` manifest.
+    Installed,
+    /// The Inventory source itself.
+    Lockfile,
+}
+
+impl LicenseOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LicenseOrigin::Clarification => "clarification",
+            LicenseOrigin::Installed => "installed",
+            LicenseOrigin::Lockfile => "lockfile",
+        }
+    }
 }

@@ -89,13 +89,27 @@ impl Project {
     }
 
     fn check_with(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+        self.run("check", args)
+    }
+
+    fn list_with(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+        self.run("list", args)
+    }
+
+    /// Runs `licguard <command>` on the Project, with `args` after its path.
+    fn run(&self, command: &str, args: &[&str]) -> assert_cmd::assert::Assert {
         Command::cargo_bin("licguard")
             .unwrap()
-            .arg("check")
+            .arg(command)
             .arg(self.path())
             .args(args)
             .assert()
     }
+}
+
+/// Parses the JSON document a command wrote on stdout.
+fn stdout_json(assert: assert_cmd::assert::Assert) -> serde_json::Value {
+    serde_json::from_slice(&assert.get_output().stdout).expect("stdout is a JSON document")
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -1709,4 +1723,474 @@ fn lockfiles_in_node_modules_and_hidden_directories_are_ignored() {
         .check()
         .success()
         .stdout(predicate::str::contains("6 packages (npm)"));
+}
+
+/// `npm-basic` with one Package per Verdict reason and License origin, under
+/// [`DENY_ISC`]: `debug` is clarified, `ms@2.1.3` is Unresolved, `wrappy` is
+/// not installed.
+fn audited_project() -> Project {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}",
+            clarification("debug", None, "Apache-2.0")
+        ))
+        .declare_ms_license("SEE LICENSE IN LICENSE")
+        .remove("node_modules/wrappy")
+}
+
+#[test]
+fn list_shows_every_package_with_its_license_verdict_reason_and_origin() {
+    audited_project().list_with(&[]).success().stdout(format!(
+        "licguard {} — 6 packages (npm)\n\n\
+         ALLOW   MIT           @types/ms@0.7.34  listed      installed      via app > @types/ms\n\
+         REVIEW  Apache-2.0    debug@4.3.4       unlisted    clarification  via app > debug\n\
+         ALLOW   MIT           ms@2.1.2          listed      installed      via app > debug > ms\n\
+         DENY    (unresolved)  ms@2.1.3          unresolved  installed      via app > ms\n\
+         DENY    ISC           once@1.4.0        listed      installed      via app > once\n\
+         DENY    ISC           wrappy@1.0.2      listed      lockfile       via app > once > wrappy\n",
+        env!("CARGO_PKG_VERSION")
+    ));
+}
+
+#[test]
+fn list_names_the_inventory_sources_of_each_package_when_there_are_several() {
+    let output = Project::from_fixture("npm-workspaces")
+        .with_policy("[policy]\ndeny = [\"ISC\"]\n")
+        .list_with(&[])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert_eq!(
+        stdout.lines().skip(2).collect::<Vec<_>>(),
+        [
+            "REVIEW  MIT  debug@4.3.4     unlisted  lockfile  via web > debug          in package-lock.json",
+            "DENY    ISC  inherits@2.0.4  listed    lockfile  via scripts > inherits   in tools/scripts/package-lock.json",
+            "REVIEW  MIT  ms@2.1.2        unlisted  lockfile  via web > debug > ms     in package-lock.json",
+            "REVIEW  MIT  ms@2.1.3        unlisted  lockfile  via app > ms             in package-lock.json, tools/scripts/package-lock.json",
+            "DENY    ISC  once@1.4.0      listed    lockfile  via web > once           in package-lock.json, tools/scripts/package-lock.json",
+            "DENY    ISC  wrappy@1.0.2    listed    lockfile  via web > once > wrappy  in package-lock.json, tools/scripts/package-lock.json",
+        ]
+    );
+}
+
+#[test]
+fn list_includes_dev_dependencies_only_when_asked() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(DENY_GPL)
+        .edit_lockfile(add_dev_dependency);
+    project
+        .list_with(&[])
+        .success()
+        .stdout(predicate::str::contains("6 packages (npm)"))
+        .stdout(predicate::str::contains("test-kit").not());
+    project
+        .list_with(&["--include-dev"])
+        .success()
+        .stdout(predicate::str::contains("7 packages (npm)"))
+        .stdout(predicate::str::contains(
+            "DENY   GPL-3.0-only  test-kit@1.0.0    listed  lockfile   via app > test-kit\n",
+        ));
+}
+
+#[test]
+fn list_groups_packages_by_verdict_most_severe_first() {
+    audited_project()
+        .list_with(&["--group-by", "verdict"])
+        .success()
+        .stdout(format!(
+            "licguard {} — 6 packages (npm)\n\n\
+             DENY\n\
+             DENY    (unresolved)  ms@2.1.3          unresolved  installed      via app > ms\n\
+             DENY    ISC           once@1.4.0        listed      installed      via app > once\n\
+             DENY    ISC           wrappy@1.0.2      listed      lockfile       via app > once > wrappy\n\
+             \n\
+             REVIEW\n\
+             REVIEW  Apache-2.0    debug@4.3.4       unlisted    clarification  via app > debug\n\
+             \n\
+             ALLOW\n\
+             ALLOW   MIT           @types/ms@0.7.34  listed      installed      via app > @types/ms\n\
+             ALLOW   MIT           ms@2.1.2          listed      installed      via app > debug > ms\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
+#[test]
+fn list_grouped_by_verdict_skips_empty_verdicts() {
+    let output = Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .list_with(&["--group-by", "verdict"])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let titles: Vec<&str> = stdout
+        .lines()
+        .filter(|l| !l.is_empty() && !l.contains('@') && !l.starts_with("licguard"))
+        .collect();
+    assert_eq!(titles, ["DENY", "ALLOW"], "{stdout}");
+}
+
+#[test]
+fn list_groups_packages_by_license_with_unresolved_last() {
+    audited_project()
+        .list_with(&["--group-by", "license"])
+        .success()
+        .stdout(format!(
+            "licguard {} — 6 packages (npm)\n\n\
+             Apache-2.0\n\
+             REVIEW  Apache-2.0    debug@4.3.4       unlisted    clarification  via app > debug\n\
+             \n\
+             ISC\n\
+             DENY    ISC           once@1.4.0        listed      installed      via app > once\n\
+             DENY    ISC           wrappy@1.0.2      listed      lockfile       via app > once > wrappy\n\
+             \n\
+             MIT\n\
+             ALLOW   MIT           @types/ms@0.7.34  listed      installed      via app > @types/ms\n\
+             ALLOW   MIT           ms@2.1.2          listed      installed      via app > debug > ms\n\
+             \n\
+             (unresolved)\n\
+             DENY    (unresolved)  ms@2.1.3          unresolved  installed      via app > ms\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
+#[test]
+fn list_json_has_a_fixed_shape() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_GPL)
+        .write("package-lock.json", GPL_LOCKFILE)
+        .list_with(&["--format", "json"])
+        .success()
+        .stdout(
+            r#"{
+  "packages": [
+    {
+      "ecosystem": "npm",
+      "name": "gpl-lib",
+      "version": "1.0.0",
+      "scope": "prod",
+      "declared_license": "GPL-3.0-only",
+      "license": "GPL-3.0-only",
+      "elected": null,
+      "verdict": "deny",
+      "reason": "listed",
+      "origin": "lockfile",
+      "introduction_path": [
+        "other",
+        "gpl-lib"
+      ],
+      "sources": [
+        "package-lock.json"
+      ]
+    }
+  ]
+}
+"#,
+        );
+}
+
+/// The JSON object of the Package `name@version` in `packages`.
+fn json_package<'a>(
+    packages: &'a serde_json::Value,
+    name: &str,
+    version: &str,
+) -> &'a serde_json::Value {
+    packages
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == name && p["version"] == version)
+        .unwrap_or_else(|| panic!("no {name}@{version} in {packages}"))
+}
+
+#[test]
+fn list_json_gives_each_package_its_declared_and_normalized_license_and_origin() {
+    let json = stdout_json(
+        audited_project()
+            .remove("node_modules/debug/node_modules/ms")
+            .edit_lockfile(|packages| {
+                packages["node_modules/wrappy"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("license");
+            })
+            .list_with(&["--format", "json"])
+            .success(),
+    );
+    let packages = &json["packages"];
+    let ids: Vec<String> = packages
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| format!("{} {}@{}", p["ecosystem"], p["name"], p["version"]))
+        .collect();
+    assert_eq!(
+        ids,
+        [
+            r#""npm" "@types/ms"@"0.7.34""#,
+            r#""npm" "debug"@"4.3.4""#,
+            r#""npm" "ms"@"2.1.2""#,
+            r#""npm" "ms"@"2.1.3""#,
+            r#""npm" "once"@"1.4.0""#,
+            r#""npm" "wrappy"@"1.0.2""#,
+        ]
+    );
+    let fields = |name, version| {
+        let p = json_package(packages, name, version);
+        [
+            &p["declared_license"],
+            &p["license"],
+            &p["verdict"],
+            &p["reason"],
+            &p["origin"],
+        ]
+        .map(|v| v.clone())
+    };
+    use serde_json::json;
+    assert_eq!(
+        fields("debug", "4.3.4"),
+        [
+            json!("MIT"),
+            json!("Apache-2.0"),
+            json!("review"),
+            json!("unlisted"),
+            json!("clarification")
+        ]
+    );
+    assert_eq!(
+        fields("ms", "2.1.2"),
+        [
+            json!("MIT"),
+            json!("MIT"),
+            json!("allow"),
+            json!("listed"),
+            json!("lockfile")
+        ]
+    );
+    assert_eq!(
+        fields("ms", "2.1.3"),
+        [
+            json!("SEE LICENSE IN LICENSE"),
+            json!(null),
+            json!("deny"),
+            json!("unresolved"),
+            json!("installed")
+        ]
+    );
+    assert_eq!(
+        fields("wrappy", "1.0.2"),
+        [
+            json!(null),
+            json!(null),
+            json!("deny"),
+            json!("unresolved"),
+            json!(null)
+        ]
+    );
+}
+
+#[test]
+fn list_json_gives_each_package_its_scope_elected_license_and_introduction_path() {
+    let json = stdout_json(
+        Project::from_fixture("npm-basic")
+            .with_policy(ALLOW_ALL)
+            .declare_ms_license("GPL-3.0-only OR MIT")
+            .edit_lockfile(|packages| {
+                add_dev_dependency(packages);
+                // Required by nothing.
+                packages["node_modules/orphan"] =
+                    serde_json::json!({ "version": "1.0.0", "license": "MIT" });
+            })
+            .list_with(&["--format", "json", "--include-dev"])
+            .success(),
+    );
+    let packages = &json["packages"];
+    let ms = json_package(packages, "ms", "2.1.3");
+    assert_eq!(ms["scope"], "prod");
+    assert_eq!(ms["license"], "GPL-3.0-only OR MIT");
+    assert_eq!(ms["elected"], "MIT");
+    assert_eq!(ms["introduction_path"], serde_json::json!(["app", "ms"]));
+    assert_eq!(ms["sources"], serde_json::json!(["package-lock.json"]));
+    let test_kit = json_package(packages, "test-kit", "1.0.0");
+    assert_eq!(test_kit["scope"], "dev");
+    assert_eq!(test_kit["elected"], serde_json::Value::Null);
+    let orphan = json_package(packages, "orphan", "1.0.0");
+    assert_eq!(orphan["introduction_path"], serde_json::Value::Null);
+}
+
+#[test]
+fn license_origin_is_that_of_the_inventory_source_that_declares_the_license() {
+    let json = stdout_json(
+        Project::from_fixture("npm-workspaces")
+            .with_policy(DENY_ALL)
+            .edit_lockfile(|packages| {
+                packages["node_modules/ms"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("license");
+            })
+            .write(
+                "tools/scripts/node_modules/ms/package.json",
+                r#"{ "name": "ms", "version": "2.1.3", "license": "ISC" }"#,
+            )
+            .list_with(&["--format", "json"])
+            .success(),
+    );
+    let ms = json_package(&json["packages"], "ms", "2.1.3");
+    assert_eq!(ms["declared_license"], "ISC");
+    assert_eq!(ms["origin"], "installed");
+    assert_eq!(
+        ms["sources"],
+        serde_json::json!(["package-lock.json", "tools/scripts/package-lock.json"])
+    );
+}
+
+#[test]
+fn check_json_reports_violations_and_warnings() {
+    let project = Project::from_fixture("npm-basic").with_policy(&format!(
+        "{DENY_ISC}{}{}",
+        clarification("left-pad", Some("1.3.0"), "MIT"),
+        clarification("left-pad", None, "MIT"),
+    ));
+    let json = stdout_json(project.check_with(&["--format", "json"]).code(1));
+    let list = stdout_json(project.list_with(&["--format", "json"]).success());
+    assert_eq!(json["violated"], true);
+    assert_eq!(
+        json["summary"],
+        serde_json::json!({ "deny": 2, "review": 0, "allow": 4 })
+    );
+    // The same Package objects as `list`.
+    assert_eq!(
+        json["violations"],
+        serde_json::json!([
+            json_package(&list["packages"], "once", "1.4.0"),
+            json_package(&list["packages"], "wrappy", "1.0.2"),
+        ])
+    );
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([
+            {
+                "kind": "unmatched_clarification",
+                "message": "clarification for left-pad matches no Package",
+                "package": "left-pad",
+                "version": null,
+            },
+            {
+                "kind": "unmatched_clarification",
+                "message": "clarification for left-pad@1.3.0 matches no Package",
+                "package": "left-pad",
+                "version": "1.3.0",
+            },
+        ])
+    );
+}
+
+#[test]
+fn check_json_violations_honour_strict_mode_and_keep_the_exit_code() {
+    let project = Project::from_fixture("npm-basic").with_policy(REVIEW_ISC);
+    let violations = |json: &serde_json::Value| -> Vec<String> {
+        json["violations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}@{}",
+                    p["name"].as_str().unwrap(),
+                    p["version"].as_str().unwrap()
+                )
+            })
+            .collect()
+    };
+
+    let json = stdout_json(project.check_with(&["--format", "json"]).success());
+    assert_eq!(json["violated"], false);
+    assert_eq!(json["summary"]["review"], 2);
+    assert!(violations(&json).is_empty(), "{json}");
+
+    let json = stdout_json(
+        project
+            .check_with(&["--format", "json", "--strict"])
+            .code(1),
+    );
+    assert_eq!(json["violated"], true);
+    assert_eq!(violations(&json), ["once@1.4.0", "wrappy@1.0.2"]);
+}
+
+#[test]
+fn check_output_option_writes_the_report_to_a_file_instead_of_stdout() {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    let file = project.path().join("report.json");
+    let expected = project
+        .check_with(&["--format", "json"])
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    project
+        .check_with(&["--format", "json", "--output", file.to_str().unwrap()])
+        .code(1)
+        .stdout("");
+    assert_eq!(fs::read(&file).unwrap(), expected);
+}
+
+#[test]
+fn list_output_option_writes_the_table_to_a_file_instead_of_stdout() {
+    let project = audited_project();
+    let file = project.path().join("inventory.txt");
+    let expected = project
+        .list_with(&["--group-by", "license"])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    project
+        .list_with(&["--group-by", "license", "--output", file.to_str().unwrap()])
+        .success()
+        .stdout("");
+    assert_eq!(fs::read(&file).unwrap(), expected);
+}
+
+#[test]
+fn unwritable_output_file_is_a_runtime_error() {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    let file = project.path().join("missing").join("report.txt");
+    for command in ["check", "list"] {
+        project
+            .run(command, &["--output", file.to_str().unwrap()])
+            .code(2)
+            .stdout("")
+            .stderr(predicate::str::contains("cannot write"))
+            .stderr(predicate::str::contains("report.txt"))
+            .stderr(predicate::str::contains("hint:"));
+    }
+}
+
+#[test]
+fn group_by_option_with_the_json_format_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .list_with(&["--format", "json", "--group-by", "license"])
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "`--group-by` applies only to `--format table`",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn list_exits_2_only_on_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .remove("package-lock.json")
+        .list_with(&[])
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::contains("no package-lock.json found under"))
+        .stderr(predicate::str::contains("hint:"));
 }

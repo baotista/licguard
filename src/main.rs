@@ -1,20 +1,21 @@
 mod clarification;
+mod evaluation;
 mod inventory;
+mod json;
 mod normalize;
 mod policy;
 mod report;
+mod table;
 mod warning;
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
-use inventory::Scope;
-use policy::Policy;
-use report::Evaluated;
-use warning::Warning;
+use table::GroupBy;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -36,7 +37,43 @@ enum Command {
         /// Also evaluate `dev` Dependencies
         #[arg(long)]
         include_dev: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = CheckFormat::Text)]
+        format: CheckFormat,
+        /// Write the report to this file instead of stdout
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
+    /// Show every Package with its license, Verdict and License origin
+    List {
+        /// Project directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Also list `dev` Dependencies
+        #[arg(long)]
+        include_dev: bool,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = ListFormat::Table)]
+        format: ListFormat,
+        /// Group the table's lines into sections
+        #[arg(long, value_enum)]
+        group_by: Option<GroupBy>,
+        /// Write the inventory to this file instead of stdout
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum CheckFormat {
+    Text,
+    Json,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ListFormat {
+    Table,
+    Json,
 }
 
 fn main() -> ExitCode {
@@ -56,60 +93,60 @@ fn run(cli: Cli) -> Result<ExitCode> {
             path,
             strict,
             include_dev,
+            format,
+            output,
         } => {
-            let policy = Policy::load(&path)?;
-            let include_dev = include_dev || policy.include_dev;
-            let inventory = inventory::inventory(&path)?;
-            // Matched against the whole inventory: a clarification for an
-            // excluded `dev` Dependency still applies to something.
-            let mut warnings: Vec<Warning> = policy
-                .clarifications
+            let evaluation = evaluation::evaluate(&path, include_dev)?;
+            let violated = evaluation
+                .evaluated
                 .iter()
-                .filter(|c| !inventory.packages.iter().any(|p| c.matches(&p.package)))
-                .map(|c| Warning::UnmatchedClarification {
-                    package: c.package.clone(),
-                    version: c.version.clone(),
-                })
-                .collect();
-            warnings.sort();
-            // With a single Inventory source, naming it adds nothing.
-            let several_sources = inventory.sources.len() > 1;
-            let mut evaluated: Vec<Evaluated> = inventory
-                .packages
-                .into_iter()
-                .filter(|p| include_dev || p.scope == Scope::Prod)
-                .map(|p| {
-                    let clarification = clarification::find(&policy.clarifications, &p.package);
-                    // A clarification's license is already a Normalized license.
-                    let license = match clarification {
-                        Some(c) => Some(c.license.clone()),
-                        None => p.declared_license.as_deref().and_then(normalize::normalize),
-                    };
-                    let outcome = policy.evaluate(license.as_deref());
-                    Evaluated {
-                        verdict: outcome.verdict,
-                        reason: outcome.reason,
-                        elected: outcome.elected,
-                        license,
-                        clarified: clarification.is_some(),
-                        package: p.package,
-                        introduction_path: p.introduction_path,
-                        sources: if several_sources {
-                            p.sources
-                        } else {
-                            Vec::new()
-                        },
-                    }
-                })
-                .collect();
-            evaluated.sort_by(|a, b| (a.verdict, &a.package).cmp(&(b.verdict, &b.package)));
-            let violated = evaluated.iter().any(|e| e.verdict.is_violation(strict));
-            print!("{}", report::text(&evaluated, &warnings, violated));
+                .any(|e| e.verdict.is_violation(strict));
+            let out = match format {
+                CheckFormat::Text => report::text(&evaluation, violated),
+                CheckFormat::Json => json::check(&evaluation, strict, violated),
+            };
+            emit(&out, output.as_deref())?;
             Ok(if violated {
                 ExitCode::from(1)
             } else {
                 ExitCode::SUCCESS
             })
+        }
+        Command::List {
+            path,
+            include_dev,
+            format,
+            group_by,
+            output,
+        } => {
+            if matches!(format, ListFormat::Json) && group_by.is_some() {
+                bail!(
+                    "`--group-by` applies only to `--format table`\nhint: remove `--group-by`; JSON consumers can group the packages themselves"
+                );
+            }
+            let evaluation = evaluation::evaluate(&path, include_dev)?;
+            let out = match format {
+                ListFormat::Table => table::table(&evaluation, group_by),
+                ListFormat::Json => json::list(&evaluation),
+            };
+            emit(&out, output.as_deref())?;
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// Writes `out` to the `output` file, else to stdout.
+fn emit(out: &str, output: Option<&Path>) -> Result<()> {
+    match output {
+        Some(file) => fs::write(file, out).map_err(|err| {
+            anyhow!(
+                "cannot write {}: {err}\nhint: check that its directory exists and is writable",
+                file.display()
+            )
+        }),
+        None => {
+            print!("{out}");
+            Ok(())
         }
     }
 }
