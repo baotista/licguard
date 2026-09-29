@@ -31,6 +31,7 @@ pub(super) fn parse(text: &str) -> Result<Lockfile> {
                     descriptors,
                     version: String::new(),
                     dependencies: Vec::new(),
+                    line: Some(number + 1),
                 });
                 section = None;
             }

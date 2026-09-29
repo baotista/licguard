@@ -40,6 +40,8 @@ pub struct Evaluated {
     pub introduction_path: Option<Vec<String>>,
     /// See [`inventory::LicensedPackage::sources`].
     pub sources: Vec<String>,
+    /// See [`inventory::LicensedPackage::line`].
+    pub line: Option<usize>,
 }
 
 impl Evaluation {
@@ -160,6 +162,7 @@ pub fn evaluate(project: &Path, include_dev: bool) -> Result<Evaluation> {
                 package: p.package,
                 introduction_path: p.introduction_path,
                 sources: p.sources,
+                line: p.line,
             }
         })
         .collect();

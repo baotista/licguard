@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -35,6 +35,7 @@ struct BerryEntry {
 /// `workspace:` entries give the Workspace members.
 pub(super) fn parse(text: &str) -> Result<Lockfile> {
     let lockfile: BerryLockfile = serde_yaml_ng::from_str(text)?;
+    let lines = header_lines(text);
     let mut entries = Vec::new();
     let mut workspaces = Vec::new();
     for (key, entry) in lockfile.entries {
@@ -56,6 +57,7 @@ pub(super) fn parse(text: &str) -> Result<Lockfile> {
             .map(|(name, range)| (name.clone(), Format::Berry.descriptor(name, range)))
             .collect();
         entries.push(Entry {
+            line: lines.get(key.as_str()).copied(),
             descriptors: key.split(", ").map(str::to_string).collect(),
             name: name.to_string(),
             version: entry.version,
@@ -68,4 +70,24 @@ pub(super) fn parse(text: &str) -> Result<Lockfile> {
         entries,
         workspaces: Some(workspaces),
     })
+}
+
+/// The 1-based line of each entry header, by key: an unindented line with
+/// the key, quoted or not, followed by `:`, as Yarn writes it.
+fn header_lines(text: &str) -> HashMap<&str, usize> {
+    let mut lines = HashMap::new();
+    for (number, line) in text.lines().enumerate() {
+        let Some(key) = line.strip_suffix(':') else {
+            continue;
+        };
+        if key.starts_with([' ', '#']) {
+            continue;
+        }
+        let key = key
+            .strip_prefix('"')
+            .and_then(|key| key.strip_suffix('"'))
+            .unwrap_or(key);
+        lines.entry(key).or_insert(number + 1);
+    }
+    lines
 }

@@ -70,10 +70,11 @@ struct WarningJson<'a> {
 
 impl<'a> From<&'a Warning> for WarningJson<'a> {
     fn from(warning: &'a Warning) -> Self {
+        let kind = warning.kind();
         let message = warning.to_string();
         match warning {
             Warning::UnmatchedClarification { package, version } => WarningJson {
-                kind: "unmatched_clarification",
+                kind,
                 message,
                 package,
                 version: version.as_deref(),
@@ -85,7 +86,7 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
                 version,
                 expires,
             } => WarningJson {
-                kind: "unmatched_waiver",
+                kind,
                 message,
                 package,
                 version: version.as_deref(),
@@ -97,7 +98,7 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
                 version,
                 expires,
             } => WarningJson {
-                kind: "expired_waiver",
+                kind,
                 message,
                 package,
                 version: version.as_deref(),
@@ -110,7 +111,7 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
                 expires,
                 days,
             } => WarningJson {
-                kind: "expiring_waiver",
+                kind,
                 message,
                 package,
                 version: version.as_deref(),

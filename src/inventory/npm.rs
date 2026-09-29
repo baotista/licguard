@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -90,6 +90,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
     let introduction_paths = paths::shortest(&roots, |key: &String, prod_only| {
         children(&lockfile.packages, key, prod_only)
     });
+    let lines = entry_lines(&text);
 
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for (key, entry) in &lockfile.packages {
@@ -120,6 +121,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
             introduction_path: introduction_paths.get(key).map(|(path, _)| path.clone()),
             sources: vec![source.to_string()],
+            line: lines.get(key.as_str()).copied(),
             package: package.clone(),
         };
         // The same Package can be installed at several places in the tree.
@@ -131,6 +133,24 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         }
     }
     Ok(packages.into_values().collect())
+}
+
+/// The 1-based line of each `node_modules` entry of a lockfile, by key: the
+/// line that starts with its `"node_modules/…":` key, as npm writes it.
+fn entry_lines(text: &str) -> HashMap<&str, usize> {
+    let mut lines = HashMap::new();
+    for (number, line) in text.lines().enumerate() {
+        let Some(rest) = line.trim_start().strip_prefix('"') else {
+            continue;
+        };
+        if let Some((key, after)) = rest.split_once('"')
+            && package_name(key).is_some()
+            && after.trim_start().starts_with(':')
+        {
+            lines.entry(key).or_insert(number + 1);
+        }
+    }
+    lines
 }
 
 /// The dependencies of the entry at `key`, as `(name, key)` pairs: `link`
