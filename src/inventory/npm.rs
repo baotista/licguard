@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
-use super::{Ecosystem, LicensedPackage, Package, Scope};
+use super::{Ecosystem, LicenseOrigin, LicensedPackage, Package, Scope};
 
 mod paths;
 
@@ -140,9 +140,16 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             name: name.to_string(),
             version: version.clone(),
         };
+        let (declared_license, license_origin) = installed_license(&root.join(key), version)
+            .map(|license| (license, LicenseOrigin::Installed))
+            .or_else(|| {
+                declared_license(entry.license.as_ref(), entry.licenses.as_ref())
+                    .map(|license| (license, LicenseOrigin::Lockfile))
+            })
+            .unzip();
         let found = LicensedPackage {
-            declared_license: installed_license(&root.join(key), version)
-                .or_else(|| declared_license(entry.license.as_ref(), entry.licenses.as_ref())),
+            declared_license,
+            license_origin,
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
             introduction_path: introduction_paths.get(key).cloned(),
             sources: vec![source.to_string()],

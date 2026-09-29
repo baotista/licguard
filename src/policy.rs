@@ -38,7 +38,25 @@ pub struct Outcome {
     pub elected: Option<String>,
 }
 
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reason::Listed => "listed",
+            Reason::Unresolved => "unresolved",
+            Reason::Unlisted => "unlisted",
+        }
+    }
+}
+
 impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Verdict::Deny => "deny",
+            Verdict::Review => "review",
+            Verdict::Allow => "allow",
+        }
+    }
+
     /// Whether this Verdict fails the gate: `deny`, or `review` in strict mode.
     pub fn is_violation(self, strict: bool) -> bool {
         match self {
