@@ -2,32 +2,35 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use super::LockEntry;
 
-/// Computes one Introduction path per lockfile entry reachable from the root
-/// entry `""`, keyed by lockfile key. Each path starts with `root_name` and is
-/// the shortest one, the first in sorted dependency-name order on ties. A
-/// `prod` entry gets the shortest path that uses neither `devDependencies`
-/// nor `dev` entries, so it shows why the Package ships. `link` entries are
-/// not followed.
+/// Computes one Introduction path per lockfile entry reachable from `roots`,
+/// given as `(key, name)` pairs, keyed by lockfile key. Each path starts with
+/// the name of a root and is the shortest one, the first in root order then
+/// sorted dependency-name order on ties. A `prod` entry gets the shortest
+/// path that uses neither `devDependencies` nor `dev` entries, so it shows
+/// why the Package ships. `link` entries are not followed.
 pub(super) fn shortest(
     packages: &BTreeMap<String, LockEntry>,
-    root_name: &str,
+    roots: &[(String, String)],
 ) -> HashMap<String, Vec<String>> {
-    let mut paths = walk(packages, root_name, true);
-    for (key, path) in walk(packages, root_name, false) {
+    let mut paths = walk(packages, roots, true);
+    for (key, path) in walk(packages, roots, false) {
         paths.entry(key).or_insert(path);
     }
     paths
 }
 
-/// Breadth-first walk from the root, visiting dependency names in sorted
-/// order; `prod_only` skips `devDependencies` and `dev` entries.
+/// Breadth-first walk from all the roots at once, visiting dependency names
+/// in sorted order; `prod_only` skips `devDependencies` and `dev` entries.
 fn walk(
     packages: &BTreeMap<String, LockEntry>,
-    root_name: &str,
+    roots: &[(String, String)],
     prod_only: bool,
 ) -> HashMap<String, Vec<String>> {
-    let mut paths = HashMap::from([(String::new(), vec![root_name.to_string()])]);
-    let mut queue = VecDeque::from([String::new()]);
+    let mut paths: HashMap<String, Vec<String>> = roots
+        .iter()
+        .map(|(key, name)| (key.clone(), vec![name.clone()]))
+        .collect();
+    let mut queue: VecDeque<String> = roots.iter().map(|(key, _)| key.clone()).collect();
     while let Some(key) = queue.pop_front() {
         let Some(entry) = packages.get(&key) else {
             continue;
@@ -57,7 +60,9 @@ fn walk(
             queue.push_back(child);
         }
     }
-    paths.remove("");
+    for (key, _) in roots {
+        paths.remove(key);
+    }
     paths
 }
 

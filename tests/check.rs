@@ -38,6 +38,13 @@ impl Project {
         self
     }
 
+    fn write(self, file: &str, contents: &str) -> Self {
+        let path = self.dir.path().join(file);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+        self
+    }
+
     fn remove(self, relative: &str) -> Self {
         let path = self.dir.path().join(relative);
         if path.is_dir() {
@@ -55,7 +62,12 @@ impl Project {
 
     /// Edits the `packages` map of the Project's `package-lock.json`.
     fn edit_lockfile(self, edit: impl FnOnce(&mut serde_json::Value)) -> Self {
-        let path = self.dir.path().join("package-lock.json");
+        self.edit_lockfile_in("package-lock.json", edit)
+    }
+
+    /// Edits the `packages` map of the given `package-lock.json`.
+    fn edit_lockfile_in(self, file: &str, edit: impl FnOnce(&mut serde_json::Value)) -> Self {
+        let path = self.dir.path().join(file);
         let mut lockfile: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         edit(&mut lockfile["packages"]);
@@ -289,7 +301,7 @@ fn missing_lockfile_is_a_runtime_error() {
         .remove("package-lock.json")
         .check()
         .code(2)
-        .stderr(predicate::str::contains("package-lock.json"))
+        .stderr(predicate::str::contains("no package-lock.json found under"))
         .stderr(predicate::str::contains("hint:"));
 }
 
@@ -1484,4 +1496,217 @@ fn clarification_to_noassertion_is_a_runtime_error() {
         .stderr(predicate::str::contains(
             "clarification #1 (`ms`): `license` `MIT OR NOASSERTION` asserts no license",
         ));
+}
+
+/// `npm-workspaces` is a real monorepo (`npm install --package-lock-only`):
+/// the root `app` with the Workspace members `apps/web` and `packages/ui`,
+/// plus the independent sub-project `tools/scripts` with its own lockfile.
+#[test]
+fn inventory_source_in_a_subdirectory_is_detected() {
+    Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ISC)
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             inherits@2.0.4  via scripts > inherits",
+        ));
+}
+
+const DENY_ALL: &str = r#"
+    [policy]
+    deny = ["MIT", "ISC"]
+"#;
+
+#[test]
+fn workspace_members_are_roots_of_introduction_paths_but_not_packages() {
+    Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT             debug@4.3.4  via web > debug",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    MIT             ms@2.1.2  via web > debug > ms",
+        ))
+        // Reached from both `web` and `ui`: the first root, by key, wins.
+        .stdout(predicate::str::contains(
+            "DENY    ISC             once@1.4.0  via web > once",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    MIT             ms@2.1.3  via app > ms",
+        ))
+        .stdout(predicate::str::contains("web@").not())
+        .stdout(predicate::str::contains("ui@").not());
+}
+
+#[test]
+fn workspace_member_is_shown_by_its_name_when_it_differs_from_its_directory() {
+    Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .edit_lockfile(|packages| {
+            packages["apps/web"]["name"] = "@acme/web".into();
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT             debug@4.3.4  via @acme/web > debug",
+        ));
+}
+
+#[test]
+fn package_in_several_inventory_sources_is_evaluated_once() {
+    let output = Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("6 packages (npm)"))
+        .stdout(predicate::str::contains("6 deny · 0 review · 0 allow"))
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert_eq!(stdout.matches("ms@2.1.3").count(), 1, "{stdout}");
+}
+
+const SCRIPTS_LOCKFILE: &str = "tools/scripts/package-lock.json";
+
+#[test]
+fn package_is_prod_if_any_inventory_source_has_it_prod() {
+    Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .edit_lockfile_in(SCRIPTS_LOCKFILE, |packages| {
+            // `dev` in the root lockfile, `prod` here.
+            packages[""]["dependencies"]["@types/ms"] = "^0.7.34".into();
+            packages["node_modules/@types/ms"] = serde_json::json!({
+                "version": "0.7.34",
+                "license": "MIT",
+            });
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT             @types/ms@0.7.34  via scripts > @types/ms",
+        ))
+        // `prod` in the root lockfile, `dev` in `tools/scripts`.
+        .stdout(predicate::str::contains(
+            "DENY    ISC             once@1.4.0  via web > once",
+        ));
+}
+
+#[test]
+fn declared_license_comes_from_the_first_inventory_source_that_declares_one() {
+    Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .edit_lockfile(|packages| {
+            packages["node_modules/ms"]
+                .as_object_mut()
+                .unwrap()
+                .remove("license");
+        })
+        .edit_lockfile_in(SCRIPTS_LOCKFILE, |packages| {
+            packages["node_modules/once"]["license"] = "MIT".into();
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT             ms@2.1.3  via app > ms",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    ISC             once@1.4.0  via web > once",
+        ));
+}
+
+#[test]
+fn report_names_the_inventory_sources_of_each_package() {
+    let output = Project::from_fixture("npm-workspaces")
+        .with_policy("[policy]\ndeny = [\"ISC\"]\n")
+        .check()
+        .code(1)
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.starts_with("DENY") || l.starts_with("REVIEW"))
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "DENY    ISC             inherits@2.0.4  via scripts > inherits  in tools/scripts/package-lock.json",
+            "DENY    ISC             once@1.4.0  via web > once  in package-lock.json, tools/scripts/package-lock.json",
+            "DENY    ISC             wrappy@1.0.2  via web > once > wrappy  in package-lock.json, tools/scripts/package-lock.json",
+            "REVIEW  MIT             debug@4.3.4  via web > debug  in package-lock.json  (unlisted)",
+            "REVIEW  MIT             ms@2.1.2  via web > debug > ms  in package-lock.json  (unlisted)",
+            "REVIEW  MIT             ms@2.1.3  via app > ms  in package-lock.json, tools/scripts/package-lock.json  (unlisted)",
+        ]
+    );
+}
+
+#[test]
+fn installed_copy_next_to_a_subdirectory_lockfile_is_a_license_origin() {
+    Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .write(
+            "tools/scripts/node_modules/inherits/package.json",
+            r#"{ "name": "inherits", "version": "2.0.4", "license": "MIT" }"#,
+        )
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT             inherits@2.0.4  via scripts > inherits",
+        ));
+}
+
+#[test]
+fn package_installed_twice_in_one_lockfile_is_one_line_with_the_shortest_path() {
+    let output = Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            packages[""]["dependencies"]["helper"] = "^2.0.0".into();
+            packages["node_modules/helper"] = serde_json::json!({
+                "version": "2.0.0",
+                "license": "ISC",
+            });
+            // `helper@1` is installed under `debug > ms` and under `once`.
+            let helper = serde_json::json!({ "version": "1.0.0", "license": "ISC" });
+            packages["node_modules/debug/node_modules/ms"]["dependencies"] =
+                serde_json::json!({ "helper": "1" });
+            packages["node_modules/debug/node_modules/ms/node_modules/helper"] = helper.clone();
+            packages["node_modules/once"]["dependencies"]["helper"] = "1".into();
+            packages["node_modules/once/node_modules/helper"] = helper;
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("8 packages (npm)"))
+        .stdout(predicate::str::contains(
+            "DENY    ISC             helper@1.0.0  via app > once > helper\n",
+        ))
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert_eq!(stdout.matches("helper@1.0.0").count(), 1, "{stdout}");
+}
+
+/// A lockfile whose only Dependency is `gpl-lib@1.0.0`, licensed `GPL-3.0-only`.
+const GPL_LOCKFILE: &str = r#"{
+  "name": "other",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "other", "dependencies": { "gpl-lib": "^1.0.0" } },
+    "node_modules/gpl-lib": { "version": "1.0.0", "license": "GPL-3.0-only" }
+  }
+}"#;
+
+#[test]
+fn lockfiles_in_node_modules_and_hidden_directories_are_ignored() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_GPL)
+        .write("node_modules/once/package-lock.json", GPL_LOCKFILE)
+        .write(".cache/old/package-lock.json", GPL_LOCKFILE)
+        .check()
+        .success()
+        .stdout(predicate::str::contains("6 packages (npm)"));
 }

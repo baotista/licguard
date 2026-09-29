@@ -16,6 +16,8 @@ pub struct Evaluated {
     pub elected: Option<String>,
     /// See [`crate::inventory::LicensedPackage::introduction_path`].
     pub introduction_path: Option<Vec<String>>,
+    /// The Inventory sources to name; empty when the Project has only one.
+    pub sources: Vec<String>,
 }
 
 /// Renders the terminal report. Expects `evaluated` and `warnings` already
@@ -65,6 +67,11 @@ pub fn text(evaluated: &[Evaluated], warnings: &[Warning], violated: bool) -> St
             Some(path) => format!("  via {}", path.join(" > ")),
             None => String::new(),
         };
+        let sources = if e.sources.is_empty() {
+            String::new()
+        } else {
+            format!("  in {}", e.sources.join(", "))
+        };
         let reason = if notes.is_empty() {
             String::new()
         } else {
@@ -72,7 +79,7 @@ pub fn text(evaluated: &[Evaluated], warnings: &[Warning], violated: bool) -> St
         };
         writeln!(
             out,
-            "{verdict:<7} {license:<15} {}@{}{via}{reason}",
+            "{verdict:<7} {license:<15} {}@{}{via}{sources}{reason}",
             e.package.name, e.package.version
         )
         .unwrap();

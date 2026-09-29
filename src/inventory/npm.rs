@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
@@ -50,21 +51,53 @@ struct InstalledManifest {
     licenses: Option<serde_json::Value>,
 }
 
-/// Reads the Project's `package-lock.json` and returns its Packages with
-/// their Declared license, taken from the first License origin that has one:
-/// the installed copy (only when its version matches the lockfile), then the
-/// lockfile entry itself. An entry is `dev` only when npm flags it `dev`:
-/// `devOptional` and `optional` entries may ship, so they are `prod`. Each
-/// Package also gets its shortest Introduction path, when it is reachable
-/// from the Project root.
-pub fn inventory(root: &Path) -> Result<Vec<LicensedPackage>> {
-    let path = root.join(LOCKFILE);
-    let text = fs::read_to_string(&path).map_err(|err| {
-        anyhow!(
-            "cannot read {}: {err}\nhint: run licguard at the root of an npm Project, or run `npm install` to create the lockfile",
-            path.display()
-        )
-    })?;
+/// Finds the Project's npm Inventory sources: every `package-lock.json` under
+/// `project`, skipping `node_modules` and hidden directories. Returns their
+/// paths relative to `project`, joined with `/`, sorted.
+pub fn lockfiles(project: &Path) -> Result<Vec<String>> {
+    let mut found = Vec::new();
+    find_lockfiles(project, "", &mut found)?;
+    if found.is_empty() {
+        bail!(
+            "no {LOCKFILE} found under {}\nhint: run licguard at the root of an npm Project, or run `npm install` to create the lockfile",
+            project.display()
+        );
+    }
+    found.sort();
+    Ok(found)
+}
+
+fn find_lockfiles(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result<()> {
+    let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = format!("{relative}{name}");
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("cannot read {}", entry.path().display()))?;
+        if file_type.is_file() && name == LOCKFILE {
+            found.push(path);
+        } else if file_type.is_dir() && name != "node_modules" && !name.starts_with('.') {
+            find_lockfiles(&entry.path(), &format!("{path}/"), found)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reads the `package-lock.json` at `source`, relative to `project`, and
+/// returns its Packages with their Declared license, taken from the first
+/// License origin that has one: the installed copy next to the lockfile (only
+/// when its version matches the lockfile), then the lockfile entry itself. An
+/// entry is `dev` only when npm flags it `dev`: `devOptional` and `optional`
+/// entries may ship, so they are `prod`. Each Package also gets its shortest
+/// Introduction path, when it is reachable from a root: the lockfile's root
+/// entry `""`, then its Workspace members.
+pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
+    let path = project.join(source);
+    let root = path.parent().unwrap_or(project);
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
     let lockfile: Lockfile = serde_json::from_str(&text)
         .with_context(|| format!("{} is not a valid npm lockfile", path.display()))?;
     if lockfile.lockfile_version < 2 {
@@ -81,9 +114,17 @@ pub fn inventory(root: &Path) -> Result<Vec<LicensedPackage>> {
         .and_then(|entry| entry.name.clone())
         .or_else(|| directory_name(root))
         .unwrap_or_default();
-    let introduction_paths = paths::shortest(&lockfile.packages, &root_name);
+    let mut roots = vec![(String::new(), root_name)];
+    roots.extend(
+        lockfile
+            .packages
+            .iter()
+            .filter(|(key, _)| is_workspace_member(key))
+            .map(|(key, entry)| (key.clone(), workspace_member_name(key, entry))),
+    );
+    let introduction_paths = paths::shortest(&lockfile.packages, &roots);
 
-    let mut packages = Vec::new();
+    let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for (key, entry) in &lockfile.packages {
         let Some(name) = package_name(key) else {
             continue; // the root, or a Workspace member
@@ -94,24 +135,47 @@ pub fn inventory(root: &Path) -> Result<Vec<LicensedPackage>> {
         let Some(version) = &entry.version else {
             bail!("{}: entry `{key}` has no version", path.display());
         };
-        packages.push(LicensedPackage {
+        let package = Package {
+            ecosystem: Ecosystem::Npm,
+            name: name.to_string(),
+            version: version.clone(),
+        };
+        let found = LicensedPackage {
             declared_license: installed_license(&root.join(key), version)
                 .or_else(|| declared_license(entry.license.as_ref(), entry.licenses.as_ref())),
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
             introduction_path: introduction_paths.get(key).cloned(),
-            package: Package {
-                ecosystem: Ecosystem::Npm,
-                name: name.to_string(),
-                version: version.clone(),
-            },
-        });
+            sources: vec![source.to_string()],
+            package: package.clone(),
+        };
+        // The same Package can be installed at several places in the tree.
+        match packages.entry(package) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(found);
+            }
+            Entry::Occupied(mut occupied) => occupied.get_mut().merge(found, true),
+        }
     }
-    Ok(packages)
+    Ok(packages.into_values().collect())
 }
 
 /// `node_modules/debug/node_modules/ms` -> `ms`; `node_modules/@types/ms` -> `@types/ms`.
 fn package_name(key: &str) -> Option<&str> {
     key.rsplit_once("node_modules/").map(|(_, name)| name)
+}
+
+/// A Workspace member is an entry outside `node_modules`, e.g. `packages/ui`,
+/// other than the root entry `""`.
+fn is_workspace_member(key: &str) -> bool {
+    !key.is_empty() && package_name(key).is_none()
+}
+
+/// The entry's `name`, else the last segment of its key.
+fn workspace_member_name(key: &str, entry: &LockEntry) -> String {
+    entry
+        .name
+        .clone()
+        .unwrap_or_else(|| key.rsplit('/').next().unwrap_or(key).to_string())
 }
 
 fn directory_name(root: &Path) -> Option<String> {

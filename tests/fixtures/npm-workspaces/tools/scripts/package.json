@@ -1,0 +1,12 @@
+{
+  "name": "scripts",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "inherits": "^2.0.4",
+    "ms": "^2.1.3"
+  },
+  "devDependencies": {
+    "once": "^1.4.0"
+  }
+}
