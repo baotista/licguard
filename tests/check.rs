@@ -1659,6 +1659,37 @@ fn installed_copy_next_to_a_subdirectory_lockfile_is_a_license_origin() {
         ));
 }
 
+#[test]
+fn package_installed_twice_in_one_lockfile_is_one_line_with_the_shortest_path() {
+    let output = Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            packages[""]["dependencies"]["helper"] = "^2.0.0".into();
+            packages["node_modules/helper"] = serde_json::json!({
+                "version": "2.0.0",
+                "license": "ISC",
+            });
+            // `helper@1` is installed under `debug > ms` and under `once`.
+            let helper = serde_json::json!({ "version": "1.0.0", "license": "ISC" });
+            packages["node_modules/debug/node_modules/ms"]["dependencies"] =
+                serde_json::json!({ "helper": "1" });
+            packages["node_modules/debug/node_modules/ms/node_modules/helper"] = helper.clone();
+            packages["node_modules/once"]["dependencies"]["helper"] = "1".into();
+            packages["node_modules/once/node_modules/helper"] = helper;
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("8 packages (npm)"))
+        .stdout(predicate::str::contains(
+            "DENY    ISC             helper@1.0.0  via app > once > helper\n",
+        ))
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert_eq!(stdout.matches("helper@1.0.0").count(), 1, "{stdout}");
+}
+
 /// A lockfile whose only Dependency is `gpl-lib@1.0.0`, licensed `GPL-3.0-only`.
 const GPL_LOCKFILE: &str = r#"{
   "name": "other",

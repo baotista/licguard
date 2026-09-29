@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::fs;
 use std::path::Path;
 
@@ -123,7 +124,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
     );
     let introduction_paths = paths::shortest(&lockfile.packages, &roots);
 
-    let mut packages = Vec::new();
+    let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for (key, entry) in &lockfile.packages {
         let Some(name) = package_name(key) else {
             continue; // the root, or a Workspace member
@@ -134,20 +135,28 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         let Some(version) = &entry.version else {
             bail!("{}: entry `{key}` has no version", path.display());
         };
-        packages.push(LicensedPackage {
+        let package = Package {
+            ecosystem: Ecosystem::Npm,
+            name: name.to_string(),
+            version: version.clone(),
+        };
+        let found = LicensedPackage {
             declared_license: installed_license(&root.join(key), version)
                 .or_else(|| declared_license(entry.license.as_ref(), entry.licenses.as_ref())),
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
             introduction_path: introduction_paths.get(key).cloned(),
             sources: vec![source.to_string()],
-            package: Package {
-                ecosystem: Ecosystem::Npm,
-                name: name.to_string(),
-                version: version.clone(),
-            },
-        });
+            package: package.clone(),
+        };
+        // The same Package can be installed at several places in the tree.
+        match packages.entry(package) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(found);
+            }
+            Entry::Occupied(mut occupied) => occupied.get_mut().merge(found, true),
+        }
     }
-    Ok(packages)
+    Ok(packages.into_values().collect())
 }
 
 /// `node_modules/debug/node_modules/ms` -> `ms`; `node_modules/@types/ms` -> `@types/ms`.

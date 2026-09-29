@@ -24,7 +24,7 @@ pub fn inventory(project: &Path) -> Result<Inventory> {
                 Entry::Vacant(entry) => {
                     entry.insert(found);
                 }
-                Entry::Occupied(mut entry) => entry.get_mut().merge(found),
+                Entry::Occupied(mut entry) => entry.get_mut().merge(found, false),
             }
         }
     }
@@ -73,7 +73,8 @@ impl LicensedPackage {
     /// Merges `other`, a later occurrence of the same Package: the Package is
     /// `prod` if any occurrence is, keeps the Introduction path of the first
     /// occurrence with that Scope, and the first Declared license found.
-    fn merge(&mut self, other: LicensedPackage) {
+    /// Within the `same_source`, the shortest path with that Scope wins.
+    fn merge(&mut self, other: LicensedPackage, same_source: bool) {
         for source in other.sources {
             if !self.sources.contains(&source) {
                 self.sources.push(source);
@@ -82,8 +83,14 @@ impl LicensedPackage {
         if self.declared_license.is_none() {
             self.declared_license = other.declared_license;
         }
+        let length = |path: &Option<Vec<String>>| path.as_ref().map_or(usize::MAX, Vec::len);
         if self.scope == Scope::Dev && other.scope == Scope::Prod {
             self.scope = Scope::Prod;
+            self.introduction_path = other.introduction_path;
+        } else if same_source
+            && self.scope == other.scope
+            && length(&other.introduction_path) < length(&self.introduction_path)
+        {
             self.introduction_path = other.introduction_path;
         }
     }
