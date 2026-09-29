@@ -2679,6 +2679,7 @@ fn init_template_sets_every_list_and_setting_with_a_comment() {
         unresolved = "deny"
         unlisted = "review"
         include_dev = false
+        waiver_expiry_warning_days = 30
         "#,
     )
     .unwrap();
@@ -2692,6 +2693,7 @@ fn init_template_sets_every_list_and_setting_with_a_comment() {
         "unresolved",
         "unlisted",
         "include_dev",
+        "waiver_expiry_warning_days",
     ] {
         let at = lines
             .iter()
