@@ -33,6 +33,8 @@ pub fn check(evaluation: &Evaluation, strict: bool, violated: bool) -> String {
         deny: usize,
         review: usize,
         allow: usize,
+        /// How many of the `allow` Verdicts come from a Waiver.
+        waived: usize,
     }
     render(&Check {
         violated,
@@ -40,6 +42,7 @@ pub fn check(evaluation: &Evaluation, strict: bool, violated: bool) -> String {
             deny: evaluation.count(Verdict::Deny),
             review: evaluation.count(Verdict::Review),
             allow: evaluation.count(Verdict::Allow),
+            waived: evaluation.waived(),
         },
         violations: evaluation
             .evaluated

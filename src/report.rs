@@ -88,7 +88,12 @@ pub fn text(evaluation: &Evaluation, violated: bool) -> String {
         evaluation.count(Verdict::Review),
         evaluation.count(Verdict::Allow),
     );
-    writeln!(out, "{deny} deny · {review} review · {allow} allow").unwrap();
+    let waived = evaluation.waived();
+    write!(out, "{deny} deny · {review} review · {allow} allow").unwrap();
+    if waived > 0 {
+        write!(out, " ({waived} waived)").unwrap();
+    }
+    out.push('\n');
     if violated {
         writeln!(out, "✗ Policy violated (exit 1)").unwrap();
     } else {

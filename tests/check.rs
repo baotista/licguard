@@ -1512,6 +1512,378 @@ fn clarification_to_noassertion_is_a_runtime_error() {
         ));
 }
 
+/// A `[[waivers]]` entry with its reason and expiry date.
+fn waiver(package: &str, version: Option<&str>, license: &str) -> String {
+    let version = version.map_or(String::new(), |v| format!("version = \"{v}\"\n"));
+    format!(
+        "\n[[waivers]]\npackage = \"{package}\"\n{version}license = \"{license}\"\nreason = \"Approved by legal, ticket LEGAL-142\"\nexpires = \"2027-01-01\"\n"
+    )
+}
+
+#[test]
+fn waiver_turns_a_denied_package_into_an_allowed_one() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}",
+            waiver("once", Some("1.4.0"), "ISC")
+        ))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("once@1.4.0").not())
+        .stdout(predicate::str::contains(
+            "DENY    ISC             wrappy@1.0.2",
+        ))
+        .stdout(predicate::str::contains(
+            "1 deny · 0 review · 5 allow (1 waived)\n",
+        ));
+}
+
+#[test]
+fn waived_review_is_not_a_violation_in_strict_mode() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{REVIEW_ISC}{}{}",
+            waiver("once", None, "ISC"),
+            waiver("wrappy", None, "ISC")
+        ))
+        .check_with(&["--strict"])
+        .success()
+        .stdout(predicate::str::contains("REVIEW").not())
+        .stdout(predicate::str::contains(
+            "0 deny · 0 review · 6 allow (2 waived)\n✓ Policy respected\n",
+        ));
+}
+
+#[test]
+fn waiver_with_a_version_applies_to_that_version_only() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_MIT}{}", waiver("ms", Some("2.1.2"), "MIT")))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("ms@2.1.2").not())
+        .stdout(predicate::str::contains(
+            "DENY    MIT             ms@2.1.3  via app > ms\n",
+        ));
+}
+
+#[test]
+fn waiver_for_another_license_does_not_apply() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_ISC}{}", waiver("once", None, "MIT")))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             once@1.4.0  via app > once\n",
+        ))
+        .stdout(predicate::str::contains("waived").not());
+}
+
+#[test]
+fn waiver_of_an_allowed_package_changes_nothing() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_ISC}{}", waiver("ms", None, "MIT")))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("2 deny · 0 review · 4 allow\n"));
+}
+
+#[test]
+fn waiver_matches_the_license_of_a_clarification() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}{}",
+            clarification("ms", None, "ISC"),
+            waiver("ms", Some("2.1.3"), "ISC")
+        ))
+        .declare_ms_license("MIT OR Apache-2.0")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("ms@2.1.3").not())
+        .stdout(predicate::str::contains(
+            "DENY    ISC             ms@2.1.2  via app > debug > ms  (clarified)\n",
+        ))
+        .stdout(predicate::str::contains(
+            "3 deny · 0 review · 3 allow (1 waived)\n",
+        ));
+}
+
+#[test]
+fn compound_waiver_license_is_matched_in_canonical_form() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"
+            [policy]
+            allow = ["ISC"]
+            deny = ["GPL-2.0-only", "MIT"]
+            {}"#,
+            waiver("ms", Some("2.1.3"), "(GPL-2.0 OR MIT)")
+        ))
+        .declare_ms_license("GPL-2.0-only OR MIT")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains("ms@2.1.3").not())
+        .stdout(predicate::str::contains("(1 waived)"));
+}
+
+#[test]
+fn waiver_license_that_is_not_strict_spdx_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}{}",
+            waiver("once", None, "ISC"),
+            waiver("ms", None, "Apache 2")
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "waiver #2 (`ms`): `license` `Apache 2` is not a valid SPDX expression",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn waiver_of_noassertion_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}",
+            waiver("ms", None, "MIT OR NOASSERTION")
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "waiver #1 (`ms`): `license` `MIT OR NOASSERTION` asserts no license",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn waiver_without_reason_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[waivers]]
+            package = "ms"
+            license = "MIT"
+            expires = "2027-01-01"
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "waiver #1 (`ms`): `reason` is missing",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn waiver_with_blank_reason_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[waivers]]
+            package = "ms"
+            license = "MIT"
+            reason = "  "
+            expires = "2027-01-01"
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "waiver #1 (`ms`): `reason` is missing or empty",
+        ));
+}
+
+#[test]
+fn waiver_without_license_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[waivers]]
+            package = "ms"
+            reason = "Approved by legal"
+            expires = "2027-01-01"
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "waiver #1 (`ms`): `license` is missing",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn waiver_without_package_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[waivers]]
+            license = "MIT"
+            reason = "Approved by legal"
+            expires = "2027-01-01"
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("waiver #1: `package` is missing"))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn waiver_without_expiry_date_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[waivers]]
+            package = "ms"
+            license = "MIT"
+            reason = "Approved by legal"
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "waiver #1 (`ms`): `expires` is missing",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+/// A `[[waivers]]` entry for `ms` whose `expires` is the TOML value `expires`.
+fn waiver_expiring(expires: &str) -> String {
+    format!(
+        "\n[[waivers]]\npackage = \"ms\"\nlicense = \"MIT\"\nreason = \"Approved by legal\"\nexpires = {expires}\n"
+    )
+}
+
+#[test]
+fn waiver_expiry_date_that_is_not_a_calendar_date_is_a_runtime_error() {
+    for expires in [
+        "\"2027-13-01\"",
+        "\"2027-02-30\"",
+        "\"2027-02-29\"",
+        "\"2027-04-31\"",
+        "\"2027-00-10\"",
+        "\"2027-01-00\"",
+        "\"2027-1-1\"",
+        "\"01/01/2027\"",
+        "\"2027-01-01 \"",
+        "\"next year\"",
+    ] {
+        Project::from_fixture("npm-basic")
+            .with_policy(&format!("{ALLOW_ALL}{}", waiver_expiring(expires)))
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "waiver #1 (`ms`): `expires` {} is not a calendar date written `YYYY-MM-DD`",
+                expires.replace('"', "`")
+            )))
+            .stderr(predicate::str::contains("hint:"));
+    }
+}
+
+#[test]
+fn waiver_expiry_date_is_a_string_or_a_toml_local_date() {
+    for expires in [
+        "\"2027-12-31\"",
+        "\"2028-02-29\"",
+        "\"2000-02-29\"",
+        "2027-01-01",
+        "2028-02-29",
+    ] {
+        Project::from_fixture("npm-basic")
+            .with_policy(&format!("{DENY_MIT}{}", waiver_expiring(expires)))
+            .check()
+            .code(1)
+            .stdout(predicate::str::contains("(2 waived)"));
+    }
+}
+
+#[test]
+fn waiver_expiry_that_is_not_a_toml_local_date_is_a_runtime_error() {
+    for expires in [
+        "2027-01-01T00:00:00",
+        "2027-01-01T00:00:00Z",
+        "12:00:00",
+        "20270101",
+    ] {
+        Project::from_fixture("npm-basic")
+            .with_policy(&format!("{ALLOW_ALL}{}", waiver_expiring(expires)))
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "waiver #1 (`ms`): `expires` `{expires}` is not a calendar date written `YYYY-MM-DD`"
+            )));
+    }
+}
+
+#[test]
+fn waiver_expiry_toml_local_date_that_does_not_exist_is_a_runtime_error() {
+    // The TOML parser rejects it before the Waiver is validated.
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{ALLOW_ALL}{}", waiver_expiring("2027-02-30")))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("invalid date"));
+}
+
+#[test]
+fn two_waivers_of_the_same_package_version_are_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}{}{}{}",
+            waiver("ms", None, "MIT"),
+            waiver("ms", Some("2.1.3"), "MIT"),
+            waiver("ms", Some("2.1.3"), "ISC"),
+            waiver("ms", None, "ISC")
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "waiver #3 (`ms`): same package and version as waiver #2",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn waiver_with_an_unknown_field_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}approved_by = \"legal\"\n",
+            waiver("ms", None, "MIT")
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("unknown field `approved_by`"));
+}
+
+#[test]
+fn waiver_without_a_version_applies_to_all_versions() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_MIT}{}", waiver("ms", None, "MIT")))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(" ms@2.1").not())
+        .stdout(predicate::str::contains(
+            "2 deny · 0 review · 4 allow (2 waived)\n",
+        ));
+}
+
+#[test]
+fn waiver_never_applies_to_an_unresolved_package() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "[policy]\nallow = [\"ISC\"]\n{}",
+            waiver("ms", Some("2.1.3"), "MIT")
+        ))
+        .declare_ms_license("SEE LICENSE IN LICENSE")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    ms@2.1.3  via app > ms\n",
+        ));
+}
+
 /// `npm-workspaces` is a real monorepo (`npm install --package-lock-only`):
 /// the root `app` with the Workspace members `apps/web` and `packages/ui`,
 /// plus the independent sub-project `tools/scripts` with its own lockfile.
@@ -2060,7 +2432,7 @@ fn check_json_reports_violations_and_warnings() {
     assert_eq!(json["violated"], true);
     assert_eq!(
         json["summary"],
-        serde_json::json!({ "deny": 2, "review": 0, "allow": 4 })
+        serde_json::json!({ "deny": 2, "review": 0, "allow": 4, "waived": 0 })
     );
     // The same Package objects as `list`.
     assert_eq!(
@@ -2193,4 +2565,29 @@ fn list_exits_2_only_on_a_runtime_error() {
         .stdout("")
         .stderr(predicate::str::contains("no package-lock.json found under"))
         .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn waived_package_is_reported_as_such_in_json() {
+    let project = Project::from_fixture("npm-basic").with_policy(&format!(
+        "{DENY_ISC}{}",
+        waiver("once", Some("1.4.0"), "ISC")
+    ));
+
+    let list = stdout_json(project.list_with(&["--format", "json"]).success());
+    let once = list["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "once")
+        .unwrap();
+    assert_eq!(once["verdict"], "allow");
+    assert_eq!(once["reason"], "waived");
+    assert_eq!(once["license"], "ISC");
+
+    let check = stdout_json(project.check_with(&["--format", "json"]).code(1));
+    assert_eq!(
+        check["summary"],
+        serde_json::json!({"deny": 1, "review": 0, "allow": 5, "waived": 1})
+    );
 }
