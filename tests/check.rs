@@ -3785,6 +3785,35 @@ fn line_starting_with(project: &Project, file: &str, prefix: &str) -> usize {
 }
 
 #[test]
+fn check_github_points_to_the_dependency_graph_entry_in_a_pnpm_lockfile() {
+    for fixture in PNPM_FIXTURES {
+        let project = in_github_workspace(Project::from_fixture(fixture).with_policy(DENY_ALL));
+        // The v9 `snapshots` entry, after the `packages` one; the v6
+        // `packages` entry. Scoped keys are quoted, and an entry without
+        // dependencies is `{}` on the same line.
+        let (after, header) = if fixture == "pnpm-v9" {
+            ("snapshots:", "'@types/ms@0.7.34':")
+        } else {
+            ("packages:", "/@types/ms@0.7.34:")
+        };
+        let section = line_starting_with(&project, "pnpm-lock.yaml", after);
+        let text = fs::read_to_string(project.path().join("pnpm-lock.yaml")).unwrap();
+        let line = text
+            .lines()
+            .enumerate()
+            .skip(section)
+            .find(|(_, line)| line.trim_start().starts_with(header))
+            .map(|(index, _)| index + 1)
+            .unwrap();
+        check_github(&project, &["--include-dev"])
+            .code(1)
+            .stdout(predicate::str::contains(format!(
+                "::error file=pnpm-lock.yaml,line={line},title=licguard%3A DENY MIT @types/ms@0.7.34::"
+            )));
+    }
+}
+
+#[test]
 fn check_github_points_to_the_entry_header_in_a_yarn_lockfile() {
     for fixture in YARN_FIXTURES {
         let project = in_github_workspace(Project::from_fixture(fixture).with_policy(DENY_ISC));

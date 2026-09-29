@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use std::collections::btree_map::Entry as MapEntry;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::Path;
 
@@ -183,10 +183,11 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             .importers
             .insert(".".to_string(), std::mem::take(&mut lockfile.root));
     }
-    let graph = match format {
-        Format::V6 => &lockfile.packages,
-        Format::V9 => &lockfile.snapshots,
+    let (graph, section) = match format {
+        Format::V6 => (&lockfile.packages, "packages"),
+        Format::V9 => (&lockfile.snapshots, "snapshots"),
     };
+    let lines = entry_lines(&text, section);
 
     let importers: Vec<(&String, &Importer)> = lockfile.importers.iter().collect();
     let roots: Vec<(Node, String)> = importers
@@ -267,9 +268,8 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             declared_license,
             scope,
             introduction_path,
-            // Lockfile lines for GitHub annotations are not recorded yet.
-            line: None,
             sources: vec![source.to_string()],
+            line: lines.get(key.as_str()).copied(),
             package: package.clone(),
         };
         // The same Package has one entry per set of resolved peers.
@@ -281,6 +281,39 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         }
     }
     Ok(packages.into_values().collect())
+}
+
+/// The 1-based line of each entry of the top-level `section`, by key: a
+/// line indented by two spaces with the key, quoted or not, followed by `:`,
+/// as pnpm writes it.
+fn entry_lines<'a>(text: &'a str, section: &str) -> HashMap<&'a str, usize> {
+    let mut lines = HashMap::new();
+    let mut current = None;
+    for (number, line) in text.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        if !line.starts_with(' ') {
+            current = line.strip_suffix(':');
+            continue;
+        }
+        let Some(content) = line.strip_prefix("  ") else {
+            continue;
+        };
+        if current != Some(section) || content.starts_with(' ') {
+            continue;
+        }
+        let key = match content.strip_prefix('\'') {
+            Some(quoted) => quoted.split_once("':").map(|(key, _)| key),
+            None => content
+                .strip_suffix(':')
+                .or_else(|| content.split_once(": ").map(|(key, _)| key)),
+        };
+        if let Some(key) = key {
+            lines.entry(key).or_insert(number + 1);
+        }
+    }
+    lines
 }
 
 /// The name of the importer `id`, a directory relative to `root`: the
