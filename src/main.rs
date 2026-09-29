@@ -9,6 +9,7 @@ mod normalize;
 mod policy;
 mod report;
 mod table;
+mod waive;
 mod waiver;
 mod warning;
 
@@ -79,6 +80,28 @@ enum Command {
         /// Overwrite an existing licguard.toml
         #[arg(long)]
         force: bool,
+    },
+    /// Write a Waiver to licguard.toml for each current Violation
+    #[command(after_help = TODAY_HELP)]
+    Waive {
+        /// Project directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Waive every current Violation (required: the only mode for now)
+        #[arg(long)]
+        all_violations: bool,
+        /// Why the Violations are tolerated (required)
+        #[arg(long, value_name = "TEXT")]
+        reason: Option<String>,
+        /// The last day the Waivers apply, written YYYY-MM-DD (required)
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        expires: Option<String>,
+        /// Also waive `review` Verdicts, as `check --strict` fails on them
+        #[arg(long)]
+        strict: bool,
+        /// Also evaluate `dev` Dependencies
+        #[arg(long)]
+        include_dev: bool,
     },
 }
 
@@ -159,6 +182,21 @@ fn run(cli: Cli) -> Result<ExitCode> {
             print!("{}", init::init(&path, force)?);
             Ok(ExitCode::SUCCESS)
         }
+        Command::Waive {
+            path,
+            all_violations,
+            reason,
+            expires,
+            strict,
+            include_dev,
+        } => waive::waive(
+            &path,
+            all_violations,
+            reason.as_deref(),
+            expires.as_deref(),
+            strict,
+            include_dev,
+        ),
     }
 }
 

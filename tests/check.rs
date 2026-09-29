@@ -123,6 +123,10 @@ impl Project {
         self.run("init", args)
     }
 
+    fn waive_with(&self, args: &[&str]) -> assert_cmd::assert::Assert {
+        self.run("waive", args)
+    }
+
     /// The Project's `licguard.toml`.
     fn policy_file(&self) -> String {
         fs::read_to_string(self.dir.path().join("licguard.toml")).unwrap()
@@ -3271,7 +3275,7 @@ fn today_that_is_not_a_calendar_date_is_a_runtime_error() {
 
 #[test]
 fn help_documents_how_to_pin_today() {
-    for command in ["check", "list"] {
+    for command in ["check", "list", "waive"] {
         Command::cargo_bin("licguard")
             .unwrap()
             .args([command, "--help"])
@@ -3599,4 +3603,332 @@ fn unwritable_job_summary_is_a_runtime_error() {
         .stderr(predicate::str::contains("cannot write the job summary"))
         .stderr(predicate::str::contains("summary.md"))
         .stderr(predicate::str::contains("hint:"));
+}
+
+/// The arguments of a `waive` run that waives every Violation until
+/// 2027-01-01.
+const WAIVE_ALL: [&str; 5] = [
+    "--all-violations",
+    "--reason",
+    "Accepted at onboarding, ticket LEGAL-7",
+    "--expires",
+    "2027-01-01",
+];
+
+#[test]
+fn waive_turns_every_violation_into_a_waiver_so_that_check_passes() {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    project.waive_with(&WAIVE_ALL).success().stdout(format!(
+        "added 2 Waivers, renewed 0 in {}\n",
+        project.path().join("licguard.toml").display()
+    ));
+    project.check().success();
+}
+
+/// A Policy full of comments, with a Waiver and a License clarification, as a
+/// Project owner would write it.
+const COMMENTED_POLICY: &str = r#"# The license rules of this Project.
+
+[policy]
+allow = ["MIT"]   # permissive only
+# ISC is denied here to exercise `waive`.
+deny = ["ISC"]
+
+# Waivers approved by legal.
+[[waivers]]
+package = "left-pad"  # removed since, kept for the record
+license = "MIT"
+reason = "Approved by legal, ticket LEGAL-1"
+expires = "2027-01-01"
+
+# Clarifications, with evidence.
+[[clarifications]]
+package = "zlib"
+license = "Zlib"
+evidence = "https://example.com/zlib/LICENSE"
+
+# End of the Policy.
+"#;
+
+/// The `[[waivers]]` entry that `waive` writes with [`WAIVE_ALL`].
+fn waived(package: &str, version: &str, license: &str) -> String {
+    format!(
+        "\n[[waivers]]\npackage = \"{package}\"\nversion = \"{version}\"\nlicense = \"{license}\"\nreason = \"Accepted at onboarding, ticket LEGAL-7\"\nexpires = \"2027-01-01\"\n"
+    )
+}
+
+#[test]
+fn waive_keeps_the_policy_byte_for_byte_and_adds_the_waivers_after_the_existing_ones() {
+    let project = Project::from_fixture("npm-basic").with_policy(COMMENTED_POLICY);
+    project.waive_with(&WAIVE_ALL).success();
+    let (before, after) = COMMENTED_POLICY.split_once("\n# Clarifications").unwrap();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{before}{}{}\n# Clarifications{after}",
+            waived("once", "1.4.0", "ISC"),
+            waived("wrappy", "1.0.2", "ISC")
+        )
+    );
+}
+
+#[test]
+fn waive_writes_the_waivers_sorted_by_package_then_version() {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_MIT);
+    project.waive_with(&WAIVE_ALL).success();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{DENY_MIT}{}{}{}{}",
+            waived("@types/ms", "0.7.34", "MIT"),
+            waived("debug", "4.3.4", "MIT"),
+            waived("ms", "2.1.2", "MIT"),
+            waived("ms", "2.1.3", "MIT")
+        )
+    );
+}
+
+#[test]
+fn waive_renews_the_expired_waiver_of_a_violation_in_place() {
+    let expired = |reason: &str, expires: &str| {
+        format!(
+            "\n[[waivers]]\npackage = \"once\"\nversion = \"1.4.0\"\nlicense = \"ISC\"\nreason = \"{reason}\"\nexpires = \"{expires}\"  # review yearly\n"
+        )
+    };
+    let project = Project::from_fixture("npm-basic").with_policy(&format!(
+        "{DENY_ISC}{}",
+        expired("Approved by legal, ticket LEGAL-1", "2026-01-01")
+    ));
+    project.waive_with(&WAIVE_ALL).success().stdout(format!(
+        "added 1 Waiver, renewed 1 in {}\n",
+        project.path().join("licguard.toml").display()
+    ));
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{DENY_ISC}{}{}",
+            expired("Accepted at onboarding, ticket LEGAL-7", "2027-01-01"),
+            waived("wrappy", "1.0.2", "ISC")
+        )
+    );
+    project.check().success();
+}
+
+#[test]
+fn waive_renews_the_waiver_of_a_package_whose_license_changed() {
+    // The Waiver no longer matches: `once@1.4.0` is ISC, not MIT.
+    let project = Project::from_fixture("npm-basic").with_policy(&format!(
+        "{DENY_ISC}{}",
+        waiver("once", Some("1.4.0"), "MIT")
+    ));
+    project.waive_with(&WAIVE_ALL).success();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{DENY_ISC}{}{}",
+            waived("once", "1.4.0", "ISC"),
+            waived("wrappy", "1.0.2", "ISC")
+        )
+    );
+    project.check().success();
+}
+
+#[test]
+fn waive_in_strict_mode_also_waives_reviewed_packages() {
+    let project = Project::from_fixture("npm-basic").with_policy(REVIEW_ISC);
+    project
+        .waive_with(&[&WAIVE_ALL[..], &["--strict"]].concat())
+        .success();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{REVIEW_ISC}{}{}",
+            waived("once", "1.4.0", "ISC"),
+            waived("wrappy", "1.0.2", "ISC")
+        )
+    );
+    project.check_with(&["--strict"]).success();
+}
+
+#[test]
+fn waive_without_violations_leaves_the_policy_untouched() {
+    // Reviewed Packages are no Violation without `--strict`.
+    let project = Project::from_fixture("npm-basic").with_policy(REVIEW_ISC);
+    project
+        .waive_with(&WAIVE_ALL)
+        .success()
+        .stdout("nothing to waive\n");
+    assert_eq!(project.policy_file(), REVIEW_ISC);
+}
+
+#[test]
+fn waive_waives_dev_dependencies_only_when_asked() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(DENY_GPL)
+        .edit_lockfile(add_dev_dependency);
+    project
+        .waive_with(&WAIVE_ALL)
+        .success()
+        .stdout("nothing to waive\n");
+    project
+        .waive_with(&[&WAIVE_ALL[..], &["--include-dev"]].concat())
+        .success();
+    assert_eq!(
+        project.policy_file(),
+        format!("{DENY_GPL}{}", waived("test-kit", "1.0.0", "GPL-3.0-only"))
+    );
+    project.check_with(&["--include-dev"]).success();
+}
+
+/// Makes `wrappy@1.0.2` Unresolved: no origin declares its license.
+fn unresolve_wrappy(project: Project) -> Project {
+    project
+        .remove("node_modules/wrappy")
+        .edit_lockfile(|packages| {
+            packages["node_modules/wrappy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("license");
+        })
+}
+
+#[test]
+fn waive_skips_unresolved_violations_and_fails() {
+    let project = unresolve_wrappy(Project::from_fixture("npm-basic").with_policy(DENY_ISC));
+    project
+        .waive_with(&WAIVE_ALL)
+        .code(1)
+        .stdout(format!(
+            "added 1 Waiver, renewed 0 in {}\n",
+            project.path().join("licguard.toml").display()
+        ))
+        .stderr(predicate::str::contains(
+            "cannot waive wrappy@1.0.2: its license is Unresolved\n",
+        ))
+        .stderr(predicate::str::contains("hint:"))
+        .stderr(predicate::str::contains("License clarification"));
+    assert_eq!(
+        project.policy_file(),
+        format!("{DENY_ISC}{}", waived("once", "1.4.0", "ISC"))
+    );
+    project
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    wrappy@1.0.2",
+        ))
+        .stdout(predicate::str::contains(
+            "1 deny · 0 review · 5 allow (1 waived)\n",
+        ));
+}
+
+#[test]
+fn waive_with_only_unresolved_violations_leaves_the_policy_untouched_and_fails() {
+    let project = unresolve_wrappy(Project::from_fixture("npm-basic").with_policy(ALLOW_ALL));
+    project
+        .waive_with(&WAIVE_ALL)
+        .code(1)
+        .stdout("")
+        .stderr(predicate::str::contains(
+            "cannot waive wrappy@1.0.2: its license is Unresolved\n",
+        ));
+    assert_eq!(project.policy_file(), ALLOW_ALL);
+}
+
+/// Runs `waive` with `args` on a Project with Violations, expects it to fail
+/// with a runtime error that contains `error` and a hint, and the Policy to
+/// be left untouched.
+fn assert_waive_rejects(args: &[&str], error: &str) {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    project
+        .waive_with(args)
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::contains(error))
+        .stderr(predicate::str::contains("hint:"));
+    assert_eq!(project.policy_file(), DENY_ISC);
+}
+
+#[test]
+fn waive_without_all_violations_is_a_runtime_error() {
+    assert_waive_rejects(
+        &WAIVE_ALL[1..],
+        "`--all-violations` is required\nhint: it is the only supported mode",
+    );
+}
+
+#[test]
+fn waive_without_a_reason_is_a_runtime_error() {
+    let [all, _, _, expires, date] = WAIVE_ALL;
+    assert_waive_rejects(&[all, expires, date], "`--reason` is required");
+    for blank in ["", "  \t "] {
+        assert_waive_rejects(
+            &[all, "--reason", blank, expires, date],
+            "`--reason` is blank",
+        );
+    }
+}
+
+#[test]
+fn waive_writes_the_reason_trimmed() {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    let [all, reason, text, expires, date] = WAIVE_ALL;
+    project
+        .waive_with(&[all, reason, &format!("  {text}\n"), expires, date])
+        .success();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{DENY_ISC}{}{}",
+            waived("once", "1.4.0", "ISC"),
+            waived("wrappy", "1.0.2", "ISC")
+        )
+    );
+}
+
+#[test]
+fn waive_without_an_expiry_date_is_a_runtime_error() {
+    assert_waive_rejects(&WAIVE_ALL[..3], "`--expires` is required");
+}
+
+#[test]
+fn waive_expiry_that_is_not_a_calendar_date_is_a_runtime_error() {
+    for expires in ["2027-02-29", "2027-1-1", "01/01/2027", "tomorrow", ""] {
+        assert_waive_rejects(
+            &[&WAIVE_ALL[..4], &[expires]].concat(),
+            &format!("`--expires` `{expires}` is not a calendar date written `YYYY-MM-DD`"),
+        );
+    }
+}
+
+#[test]
+fn waive_expiry_before_today_is_a_runtime_error() {
+    // `TODAY` is 2026-06-01.
+    assert_waive_rejects(
+        &[&WAIVE_ALL[..4], &["2026-05-31"]].concat(),
+        "`--expires` `2026-05-31` is before today (2026-06-01)",
+    );
+}
+
+#[test]
+fn waive_into_an_inline_waivers_array_is_a_runtime_error() {
+    let policy = format!("waivers = []\n{DENY_ISC}");
+    let project = Project::from_fixture("npm-basic").with_policy(&policy);
+    project
+        .waive_with(&WAIVE_ALL)
+        .code(2)
+        .stderr(predicate::str::contains(
+            "`waivers` is not written as `[[waivers]]` tables",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+    assert_eq!(project.policy_file(), policy);
+}
+
+#[test]
+fn waive_expiry_can_be_today() {
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    project
+        .waive_with(&[&WAIVE_ALL[..4], &[TODAY]].concat())
+        .success();
+    project.check().success();
 }
