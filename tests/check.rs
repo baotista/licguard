@@ -760,6 +760,41 @@ fn include_dev_setting_includes_dev_dependencies() {
 }
 
 #[test]
+fn prod_dependency_path_goes_through_prod_packages_only() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            // `app > a-test-kit > wrappy` comes first in name order, but is dev.
+            packages[""]["devDependencies"] = serde_json::json!({ "a-test-kit": "^1.0.0" });
+            packages["node_modules/a-test-kit"] = serde_json::json!({
+                "version": "1.0.0",
+                "dev": true,
+                "license": "MIT",
+                "dependencies": { "wrappy": "1" },
+            });
+        })
+        .check_with(&["--include-dev"])
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             wrappy@1.0.2  via app > once > wrappy\n",
+        ));
+}
+
+#[test]
+fn prod_dependency_path_does_not_start_with_a_root_dev_dependency() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .edit_lockfile(|packages| {
+            packages[""]["devDependencies"] = serde_json::json!({ "wrappy": "^1.0.2" });
+        })
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             wrappy@1.0.2  via app > once > wrappy\n",
+        ));
+}
+
+#[test]
 fn dev_optional_and_optional_dependencies_are_prod() {
     Project::from_fixture("npm-basic")
         .with_policy(DENY_GPL)
