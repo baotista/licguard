@@ -173,7 +173,7 @@ The first origin that declares a license wins, even if that Declared license lat
 | --- | --- | --- |
 | `licguard check [PATH]` | Is the gate passing? Reports Violations and Warnings, sets the exit code | P0 |
 | `licguard list [PATH]` | What is inside? The full inventory with licenses, Verdicts and origins; exits 0 unless a runtime error occurs | P0 |
-| `licguard init` | Writes the neutral template `licguard.toml` | P0 |
+| `licguard init [PATH]` | Writes the neutral template `licguard.toml`; refuses to replace an existing one unless `--force` is passed | P0 |
 | `licguard waive --all-violations --reason <TEXT> --expires <DATE>` | Appends Waivers for current Violations; `--reason` and `--expires` are mandatory | P0 |
 | `licguard explain <PACKAGE>` | Declared license, Normalized license, License origin, Introduction paths | P1 |
 

@@ -11,7 +11,7 @@ use crate::clarification::Clarification;
 use crate::normalize;
 use crate::waiver::Waiver;
 
-const CONFIG: &str = "licguard.toml";
+pub const CONFIG: &str = "licguard.toml";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "lowercase")]

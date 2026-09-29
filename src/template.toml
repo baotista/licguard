@@ -1,0 +1,50 @@
+# licguard Policy: the license rules this Project's dependencies are checked
+# against. Keep this file under version control, at the Project root.
+#
+# This is a neutral starting point written by `licguard init`, not a
+# recommendation. licguard is not legal advice: have this Policy validated by
+# your own legal counsel before relying on it.
+#
+# Licenses are SPDX identifiers (https://spdx.org/licenses/). Each license may
+# appear in at most one of the lists below.
+
+[policy]
+# Licenses whose Packages are accepted.
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "0BSD", "Unlicense", "CC0-1.0"]
+# Licenses whose Packages need a human decision; they fail `check` only with
+# `--strict`.
+review = ["MPL-2.0", "LGPL-2.1-only", "LGPL-3.0-only", "EPL-2.0", "CDDL-1.0"]
+# Licenses whose Packages fail `check`.
+deny = ["GPL-2.0-only", "GPL-3.0-only", "AGPL-3.0-only", "SSPL-1.0", "BUSL-1.1"]
+# Verdict (allow, review or deny) for a Package whose license is Unresolved:
+# none was found, or it cannot be normalized to an SPDX expression.
+unresolved = "deny"
+# Verdict (allow, review or deny) for a Package whose license is a valid SPDX
+# license listed in none of the lists above.
+unlisted = "review"
+# Whether `dev` Dependencies, needed only to build and test the Project, are
+# evaluated too. `--include-dev` turns it on for one run.
+include_dev = false
+
+# License clarifications assert the real license of a Package whose declared
+# license is missing or wrong, with evidence. The Policy then evaluates that
+# license like any other. They never expire. To add one, uncomment and adapt
+# this example, one entry per Package:
+#
+# [[clarifications]]
+# package = "legacy-utils"
+# version = "0.0.4"          # optional: all versions if absent
+# license = "MIT"            # SPDX expression of the real license
+# evidence = "https://github.com/example/legacy-utils/blob/v0.0.4/LICENSE"
+
+# Waivers tolerate a Package whose license would otherwise fail the Policy,
+# until they expire. A Waiver applies only while the Package's license is the
+# one it names; it never changes the license. To add one, uncomment and adapt
+# this example, one entry per Package:
+#
+# [[waivers]]
+# package = "some-lib"
+# version = "2.1.0"          # optional: all versions if absent
+# license = "LGPL-3.0-only"  # the license the Waiver tolerates
+# reason = "Approved by legal, ticket LEGAL-142"
+# expires = "2027-01-01"     # YYYY-MM-DD
