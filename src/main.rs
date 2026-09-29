@@ -1,7 +1,9 @@
+mod clarification;
 mod inventory;
 mod normalize;
 mod policy;
 mod report;
+mod warning;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,6 +14,7 @@ use clap::{Parser, Subcommand};
 use inventory::Scope;
 use policy::Policy;
 use report::Evaluated;
+use warning::Warning;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -56,17 +59,36 @@ fn run(cli: Cli) -> Result<ExitCode> {
         } => {
             let policy = Policy::load(&path)?;
             let include_dev = include_dev || policy.include_dev;
-            let mut evaluated: Vec<Evaluated> = inventory::npm::inventory(&path)?
+            let packages = inventory::npm::inventory(&path)?;
+            // Matched against the whole inventory: a clarification for an
+            // excluded `dev` Dependency still applies to something.
+            let mut warnings: Vec<Warning> = policy
+                .clarifications
+                .iter()
+                .filter(|c| !packages.iter().any(|p| c.matches(&p.package)))
+                .map(|c| Warning::UnmatchedClarification {
+                    package: c.package.clone(),
+                    version: c.version.clone(),
+                })
+                .collect();
+            warnings.sort();
+            let mut evaluated: Vec<Evaluated> = packages
                 .into_iter()
                 .filter(|p| include_dev || p.scope == Scope::Prod)
                 .map(|p| {
-                    let license = p.declared_license.as_deref().and_then(normalize::normalize);
+                    let clarification = clarification::find(&policy.clarifications, &p.package);
+                    // A clarification's license is already a Normalized license.
+                    let license = match clarification {
+                        Some(c) => Some(c.license.clone()),
+                        None => p.declared_license.as_deref().and_then(normalize::normalize),
+                    };
                     let outcome = policy.evaluate(license.as_deref());
                     Evaluated {
                         verdict: outcome.verdict,
                         reason: outcome.reason,
                         elected: outcome.elected,
                         license,
+                        clarified: clarification.is_some(),
                         package: p.package,
                         introduction_path: p.introduction_path,
                     }
@@ -74,7 +96,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .collect();
             evaluated.sort_by(|a, b| (a.verdict, &a.package).cmp(&(b.verdict, &b.package)));
             let violated = evaluated.iter().any(|e| e.verdict.is_violation(strict));
-            print!("{}", report::text(&evaluated, violated));
+            print!("{}", report::text(&evaluated, &warnings, violated));
             Ok(if violated {
                 ExitCode::from(1)
             } else {

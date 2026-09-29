@@ -26,13 +26,17 @@ pub fn normalize(declared: &str) -> Option<String> {
         ..spdx::ParseMode::LAX
     };
     let expression = spdx::Expression::parse_mode(&replace_aliases(declared), mode).ok()?;
-    let unknown = expression.requirements().any(|r| {
+    (!is_unknown(&expression)).then(|| render(&expression))
+}
+
+/// Whether the expression contains `NOASSERTION`, i.e. the license is unknown.
+pub fn is_unknown(expression: &spdx::Expression) -> bool {
+    expression.requirements().any(|r| {
         r.req
             .license
             .id()
             .is_some_and(|id| id.name == "NOASSERTION")
-    });
-    (!unknown).then(|| render(&expression))
+    })
 }
 
 /// Replaces each license term that is an alias, or an SPDX identifier or
@@ -83,8 +87,9 @@ fn take_term(words: &mut Vec<&str>) -> Option<String> {
 }
 
 /// Renders an expression with canonical operators and parentheses only
-/// where precedence needs them.
-fn render(expression: &spdx::Expression) -> String {
+/// where precedence needs them, and deprecated GNU identifiers mapped to
+/// their current ones.
+pub fn render(expression: &spdx::Expression) -> String {
     // The expression comes in postfix order: (text, whether its top-level
     // operator is `OR`).
     let mut stack: Vec<(String, bool)> = Vec::new();

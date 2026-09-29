@@ -1189,3 +1189,299 @@ fn at_least_98_percent_of_real_world_packages_are_resolved() {
     assert!(total > 300, "the corpus has only {total} packages");
     assert!(rate <= 2.0, "{rate:.2} % of the packages are unresolved");
 }
+
+/// A `[[clarifications]]` entry with its evidence.
+fn clarification(package: &str, version: Option<&str>, license: &str) -> String {
+    let version = version.map_or(String::new(), |v| format!("version = \"{v}\"\n"));
+    format!(
+        "\n[[clarifications]]\npackage = \"{package}\"\n{version}license = \"{license}\"\nevidence = \"https://example.com/{package}/LICENSE\"\n"
+    )
+}
+
+#[test]
+fn clarification_replaces_the_declared_license() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}",
+            clarification("ms", Some("2.1.3"), "ISC")
+        ))
+        .declare_ms_license("SEE LICENSE IN LICENSE")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             ms@2.1.3  via app > ms",
+        ));
+}
+
+#[test]
+fn clarified_package_is_marked_first_in_its_notes() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "[policy]\nallow = [\"MIT\"]\n{}",
+            clarification("ms", Some("2.1.3"), "ISC")
+        ))
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  ISC             ms@2.1.3  via app > ms  (clarified, unlisted)\n",
+        ));
+}
+
+#[test]
+fn clarification_takes_priority_over_the_lockfile_license() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_MIT}{}",
+            clarification("wrappy", Some("1.0.2"), "MIT")
+        ))
+        .remove("node_modules/wrappy")
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    MIT             wrappy@1.0.2  via app > once > wrappy  (clarified)\n",
+        ));
+}
+
+#[test]
+fn clarification_with_a_version_applies_to_that_version_only() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}",
+            clarification("ms", Some("2.1.2"), "ISC")
+        ))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             ms@2.1.2  via app > debug > ms  (clarified)\n",
+        ))
+        .stdout(predicate::str::contains("ms@2.1.3").not());
+}
+
+#[test]
+fn clarification_without_a_version_applies_to_all_versions() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!("{DENY_ISC}{}", clarification("ms", None, "ISC")))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             ms@2.1.2  via app > debug > ms  (clarified)\n",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    ISC             ms@2.1.3  via app > ms  (clarified)\n",
+        ));
+}
+
+#[test]
+fn clarification_license_that_is_not_strict_spdx_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}{}",
+            clarification("once", None, "ISC"),
+            clarification("ms", None, "Apache 2")
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "clarification #2 (`ms`): `license` `Apache 2` is not a valid SPDX expression",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn compound_clarification_license_is_evaluated_in_canonical_form() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"
+            [policy]
+            allow = ["MIT"]
+            review = ["ISC"]
+            deny = ["GPL-2.0-only"]
+            {}"#,
+            clarification("ms", Some("2.1.3"), "(GPL-2.0 OR ISC)")
+        ))
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "REVIEW  ISC             ms@2.1.3  via app > ms  (clarified, elected from GPL-2.0-only OR ISC)\n",
+        ));
+}
+
+#[test]
+fn clarification_without_evidence_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[clarifications]]
+            package = "ms"
+            license = "MIT"
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "clarification #1 (`ms`): `evidence` is missing",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn clarification_with_blank_evidence_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[clarifications]]
+            package = "ms"
+            license = "MIT"
+            evidence = "  "
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "clarification #1 (`ms`): `evidence` is missing or empty",
+        ));
+}
+
+#[test]
+fn clarification_without_license_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[clarifications]]
+            package = "ms"
+            evidence = "https://example.com/ms/LICENSE"
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "clarification #1 (`ms`): `license` is missing",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn clarification_without_package_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            r#"{ALLOW_ALL}
+            [[clarifications]]
+            license = "MIT"
+            evidence = "https://example.com/ms/LICENSE"
+            "#
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "clarification #1: `package` is missing",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn clarification_with_an_unknown_field_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}ecosystem = \"npm\"\n",
+            clarification("ms", None, "MIT")
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains("unknown field `ecosystem`"));
+}
+
+#[test]
+fn clarification_matching_no_package_is_a_warning_that_does_not_fail_the_gate() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}",
+            clarification("left-pad", Some("1.3.0"), "MIT")
+        ))
+        .check()
+        .success()
+        .stdout(predicate::str::contains(
+            "(npm)\n\nwarning: clarification for left-pad@1.3.0 matches no Package\n\n0 deny · 0 review · 6 allow\n✓ Policy respected\n",
+        ));
+}
+
+#[test]
+fn warnings_follow_the_packages_in_a_stable_order() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}{}{}{}",
+            clarification("zlib", None, "Zlib"),
+            clarification("ms", Some("9.9.9"), "MIT"),
+            clarification("left-pad", Some("1.3.0"), "MIT"),
+            clarification("left-pad", None, "MIT"),
+        ))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "wrappy@1.0.2  via app > once > wrappy\n\n\
+             warning: clarification for left-pad matches no Package\n\
+             warning: clarification for left-pad@1.3.0 matches no Package\n\
+             warning: clarification for ms@9.9.9 matches no Package\n\
+             warning: clarification for zlib matches no Package\n\n\
+             2 deny · 0 review · 4 allow\n",
+        ));
+}
+
+#[test]
+fn clarification_of_an_excluded_dev_dependency_is_not_a_warning() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_GPL}{}",
+            clarification("test-kit", None, "MIT")
+        ))
+        .edit_lockfile(add_dev_dependency)
+        .check()
+        .success()
+        .stdout(predicate::str::contains("warning:").not());
+}
+
+#[test]
+fn clarification_of_a_version_prevails_over_one_for_all_versions() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}{}",
+            clarification("ms", None, "ISC"),
+            clarification("ms", Some("2.1.3"), "MIT")
+        ))
+        .check()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "DENY    ISC             ms@2.1.2  via app > debug > ms  (clarified)\n",
+        ))
+        .stdout(predicate::str::contains("ms@2.1.3").not());
+}
+
+#[test]
+fn two_clarifications_of_the_same_package_version_are_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}{}{}",
+            clarification("ms", None, "MIT"),
+            clarification("ms", Some("2.1.3"), "MIT"),
+            clarification("ms", None, "ISC")
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "clarification #3 (`ms`): same package and version as clarification #1",
+        ))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn clarification_to_noassertion_is_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}",
+            clarification("ms", None, "MIT OR NOASSERTION")
+        ))
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(
+            "clarification #1 (`ms`): `license` `MIT OR NOASSERTION` asserts no license",
+        ));
+}
