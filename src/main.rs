@@ -6,6 +6,7 @@ mod normalize;
 mod policy;
 mod report;
 mod table;
+mod waiver;
 mod warning;
 
 use std::fs;

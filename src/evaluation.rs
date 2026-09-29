@@ -54,6 +54,14 @@ impl Evaluation {
             .filter(|e| e.verdict == verdict)
             .count()
     }
+
+    /// How many `allow` Verdicts come from a Waiver.
+    pub fn waived(&self) -> usize {
+        self.evaluated
+            .iter()
+            .filter(|e| e.reason == Reason::Waived)
+            .count()
+    }
 }
 
 /// Evaluates the Project at `project` against its Policy; `dev` Dependencies
@@ -88,7 +96,17 @@ pub fn evaluate(project: &Path, include_dev: bool) -> Result<Evaluation> {
                     p.license_origin,
                 ),
             };
-            let outcome = policy.evaluate(license.as_deref());
+            let mut outcome = policy.evaluate(license.as_deref());
+            // A Waiver tolerates the Verdict, never changes the license.
+            if outcome.verdict != Verdict::Allow
+                && policy
+                    .waivers
+                    .iter()
+                    .any(|w| w.matches(&p.package, license.as_deref()))
+            {
+                outcome.verdict = Verdict::Allow;
+                outcome.reason = Reason::Waived;
+            }
             Evaluated {
                 verdict: outcome.verdict,
                 reason: outcome.reason,

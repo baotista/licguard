@@ -9,6 +9,7 @@ use spdx::{LicenseItem, LicenseReq};
 
 use crate::clarification::Clarification;
 use crate::normalize;
+use crate::waiver::Waiver;
 
 const CONFIG: &str = "licguard.toml";
 
@@ -27,6 +28,8 @@ pub enum Reason {
     Listed,
     Unresolved,
     Unlisted,
+    /// A Waiver turned a `review` or `deny` Verdict into `allow`.
+    Waived,
 }
 
 /// The result of evaluating one Package's license against the Policy.
@@ -44,6 +47,7 @@ impl Reason {
             Reason::Listed => "listed",
             Reason::Unresolved => "unresolved",
             Reason::Unlisted => "unlisted",
+            Reason::Waived => "waived",
         }
     }
 }
@@ -73,6 +77,8 @@ struct Config {
     policy: Policy,
     #[serde(default)]
     clarifications: Vec<Clarification>,
+    #[serde(default)]
+    waivers: Vec<Waiver>,
 }
 
 #[derive(Deserialize)]
@@ -94,6 +100,9 @@ pub struct Policy {
     /// The `[[clarifications]]` entries, which sit beside `[policy]`.
     #[serde(skip)]
     pub clarifications: Vec<Clarification>,
+    /// The `[[waivers]]` entries, which sit beside `[policy]`.
+    #[serde(skip)]
+    pub waivers: Vec<Waiver>,
 }
 
 fn default_unresolved() -> Verdict {
@@ -117,6 +126,7 @@ impl Policy {
             toml::from_str(&text).with_context(|| format!("{} is invalid", path.display()))?;
         let mut policy = config.policy;
         policy.clarifications = config.clarifications;
+        policy.waivers = config.waivers;
         let mut seen: HashMap<String, &str> = HashMap::new();
         for (list, entries) in [
             ("allow", &mut policy.allow),
@@ -156,6 +166,24 @@ impl Policy {
             if let Some(first) = clarified.insert(key, number) {
                 bail!(
                     "{}: clarification #{number}{package}: same package and version as clarification #{first}\nhint: keep exactly one of them",
+                    path.display()
+                );
+            }
+        }
+        let mut waived: HashMap<(String, Option<String>), usize> = HashMap::new();
+        for (i, waiver) in policy.waivers.iter_mut().enumerate() {
+            let number = i + 1;
+            let package = match waiver.package.trim() {
+                "" => String::new(),
+                name => format!(" (`{name}`)"),
+            };
+            if let Err(err) = waiver.validate() {
+                bail!("{}: waiver #{number}{package}: {err}", path.display());
+            }
+            let key = (waiver.package.clone(), waiver.version.clone());
+            if let Some(first) = waived.insert(key, number) {
+                bail!(
+                    "{}: waiver #{number}{package}: same package and version as waiver #{first}\nhint: keep exactly one of them",
                     path.display()
                 );
             }
