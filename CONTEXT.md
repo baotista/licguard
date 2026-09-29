@@ -49,7 +49,7 @@ The option of an `OR` expression that the verdict is based on — the most favor
 _Avoid_: Chosen option, selected license
 
 **License origin**:
-Where a Package's license information came from: the installed package, the registry, or a License clarification.
+Where a Package's license information came from: a License clarification, the installed package, the Inventory source itself (e.g. a lockfile that records licenses), the cache, or the registry.
 _Avoid_: License source, provenance
 
 **License clarification**:

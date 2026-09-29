@@ -62,7 +62,7 @@ The goal: no **Violation** reaches a Project's main branch unless it is covered 
 
 | Priority | Ecosystem | Inventory sources | License origins |
 | --- | --- | --- | --- |
-| P0 | npm | `package-lock.json` v2/v3, `yarn.lock` (v1 and Berry), `pnpm-lock.yaml` | installed package, npm registry |
+| P0 | npm | `package-lock.json` v2/v3, `yarn.lock` (v1 and Berry), `pnpm-lock.yaml` | installed package, lockfile, npm registry |
 | P1 | Java (Maven, Gradle) | CycloneDX JSON SBOM from the official plugins; `mvn dependency:tree` / Gradle `dependencies` as fallback | POM `<licenses>`, Maven Central |
 | P2 | Composer, pip, Cargo | Native lockfiles or SBOM | Respective registries, deps.dev |
 
@@ -161,10 +161,11 @@ In priority order:
 
 1. License clarification.
 2. Installed package (`node_modules`), **only if its version matches the Inventory source exactly**; a mismatching copy is skipped (Warning in `--verbose`: "run `npm install`").
-3. Cache.
-4. Registry.
+3. The Inventory source itself, when it records licenses (npm v2/v3 lockfiles copy each entry's `license` from the registry at install time).
+4. Cache.
+5. Registry.
 
-The Inventory source is the single source of truth for which Packages exist; installed packages only supply metadata. With `--offline`, a Package that no local origin can resolve is Unresolved (Verdict per `unresolved`). Without `--offline`, an unreachable registry with no cache entry is a runtime error (exit 2).
+The first origin that declares a license wins, even if that Declared license later turns out Unresolved. The Inventory source is the single source of truth for which Packages exist; installed packages only supply metadata. Because lockfiles record licenses, `check` works on a fresh clone without `npm install`, and optional packages for other platforms (e.g. `@esbuild/linux-x64` on macOS), which are never installed locally, still get their license. With `--offline`, a Package that no local origin can resolve is Unresolved (Verdict per `unresolved`). Without `--offline`, an unreachable registry with no cache entry is a runtime error (exit 2).
 
 ## CLI
 
@@ -215,7 +216,7 @@ warning: waiver for some-lib@2.1.0 expires in 12 days (2026-10-10)
 | NF-01 | Single static binary for Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64 | P0 |
 | NF-02 | < 30 s for ~1,500 dependencies with a warm cache; < 2 min cold | P0 |
 | NF-03 | Deterministic results: same input, same output, stable sort order | P0 |
-| NF-04 | Works offline with `--offline` when the cache or installed packages suffice | P0 |
+| NF-04 | Works offline with `--offline` when the lockfile, the cache or installed packages suffice | P0 |
 | NF-05 | Bounded concurrent network requests (e.g. 16) with retry and backoff | P0 |
 | NF-06 | Corporate proxies and private registries (`.npmrc`, `settings.xml`) | P1 |
 | NF-07 | No project data sent anywhere but the registries queried; no telemetry | P0 |
