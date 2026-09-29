@@ -86,13 +86,13 @@ fn find_lockfiles(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result
 }
 
 /// Reads the `package-lock.json` at `source`, relative to `project`, and
-/// returns its Packages with
-/// their Declared license, taken from the first License origin that has one:
-/// the installed copy (only when its version matches the lockfile), then the
-/// lockfile entry itself. An entry is `dev` only when npm flags it `dev`:
-/// `devOptional` and `optional` entries may ship, so they are `prod`. Each
-/// Package also gets its shortest Introduction path, when it is reachable
-/// from a root: the lockfile's root entry `""`, then its Workspace members.
+/// returns its Packages with their Declared license, taken from the first
+/// License origin that has one: the installed copy next to the lockfile (only
+/// when its version matches the lockfile), then the lockfile entry itself. An
+/// entry is `dev` only when npm flags it `dev`: `devOptional` and `optional`
+/// entries may ship, so they are `prod`. Each Package also gets its shortest
+/// Introduction path, when it is reachable from a root: the lockfile's root
+/// entry `""`, then its Workspace members.
 pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
     let path = project.join(source);
     let root = path.parent().unwrap_or(project);

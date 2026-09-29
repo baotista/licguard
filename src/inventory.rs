@@ -62,8 +62,8 @@ pub struct LicensedPackage {
     pub package: Package,
     pub declared_license: Option<String>,
     pub scope: Scope,
-    /// Package names from the Project root to this Package; `None` when it is
-    /// not reachable from the root.
+    /// Package names from a root (the Project root or a Workspace member) to
+    /// this Package; `None` when it is not reachable from any root.
     pub introduction_path: Option<Vec<String>>,
     /// The Inventory sources the Package was found in, sorted.
     pub sources: Vec<String>,
