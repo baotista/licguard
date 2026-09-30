@@ -1,3 +1,4 @@
+mod cache;
 mod clarification;
 mod date;
 mod evaluation;
@@ -21,6 +22,7 @@ use std::process::ExitCode;
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 
+use evaluation::Remote;
 use table::GroupBy;
 
 #[derive(Parser)]
@@ -33,7 +35,9 @@ struct Cli {
 /// The help text of the commands that evaluate the Project.
 const EVALUATION_HELP: &str = "Waiver expiry is evaluated as of today (local date); set LICGUARD_TODAY=YYYY-MM-DD to evaluate it as of another date, e.g. to re-run an old CI job.
 
-Packages that no local License origin declares a license for get it from the npm registry, https://registry.npmjs.org, unless --offline; set LICGUARD_NPM_REGISTRY=URL to query another one, e.g. a mirror.";
+Packages that no local License origin declares a license for get it from the npm registry, https://registry.npmjs.org, unless --offline; set LICGUARD_NPM_REGISTRY=URL to query another one, e.g. a mirror.
+
+The registry's answers are kept in a license cache, one file per registry, and reused by later runs, --offline ones included; published versions never change, so they never expire (--refresh requests them again). A 404 is not cached. The cache is in the directory --cache-dir names, else in the one LICGUARD_CACHE_DIR=DIR names, else in `licguard` under the user's cache directory (~/.cache or XDG_CACHE_HOME on Linux, ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows).";
 
 #[derive(Subcommand)]
 enum Command {
@@ -55,9 +59,8 @@ enum Command {
         /// Write the report to this file instead of stdout
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
-        /// Make no network request: Packages without a local License origin stay Unresolved
-        #[arg(long)]
-        offline: bool,
+        #[command(flatten)]
+        remote: Remote,
     },
     /// Show every Package with its license, Verdict and License origin
     #[command(after_help = EVALUATION_HELP)]
@@ -77,9 +80,8 @@ enum Command {
         /// Write the inventory to this file instead of stdout
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
-        /// Make no network request: Packages without a local License origin stay Unresolved
-        #[arg(long)]
-        offline: bool,
+        #[command(flatten)]
+        remote: Remote,
     },
     /// Write a neutral template Policy to the Project's licguard.toml
     Init {
@@ -111,9 +113,8 @@ enum Command {
         /// Also evaluate `dev` Dependencies
         #[arg(long)]
         include_dev: bool,
-        /// Make no network request: Packages without a local License origin stay Unresolved
-        #[arg(long)]
-        offline: bool,
+        #[command(flatten)]
+        remote: Remote,
     },
 }
 
@@ -149,9 +150,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             include_dev,
             format,
             output,
-            offline,
+            remote,
         } => {
-            let evaluation = evaluation::evaluate(&path, include_dev, offline)?;
+            let evaluation = evaluation::evaluate(&path, include_dev, &remote)?;
             let violated = evaluation
                 .evaluated
                 .iter()
@@ -177,14 +178,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             format,
             group_by,
             output,
-            offline,
+            remote,
         } => {
             if matches!(format, ListFormat::Json) && group_by.is_some() {
                 bail!(
                     "`--group-by` applies only to `--format table`\nhint: remove `--group-by`; JSON consumers can group the packages themselves"
                 );
             }
-            let evaluation = evaluation::evaluate(&path, include_dev, offline)?;
+            let evaluation = evaluation::evaluate(&path, include_dev, &remote)?;
             let out = match format {
                 ListFormat::Table => table::table(&evaluation, group_by),
                 ListFormat::Json => json::list(&evaluation),
@@ -203,7 +204,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             expires,
             strict,
             include_dev,
-            offline,
+            remote,
         } => waive::waive(
             &path,
             all_violations,
@@ -211,7 +212,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             expires.as_deref(),
             strict,
             include_dev,
-            offline,
+            &remote,
         ),
     }
 }

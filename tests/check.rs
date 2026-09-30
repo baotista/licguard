@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -22,6 +22,10 @@ struct Project {
     /// The npm registry the commands query, unless `LICGUARD_NPM_REGISTRY`
     /// is set otherwise: by default, it knows no Package.
     registry: Registry,
+    /// The license cache of the commands, unless `LICGUARD_CACHE_DIR` is
+    /// set otherwise: empty at first, so that no test depends on another or
+    /// writes to the developer's cache.
+    cache: TempDir,
 }
 
 /// The date `LICGUARD_TODAY` pins by default, so that no test depends on the
@@ -39,6 +43,7 @@ impl Project {
             dir,
             env: Vec::new(),
             registry: Registry::start(),
+            cache: TempDir::new().unwrap(),
         }
     }
 
@@ -177,7 +182,8 @@ impl Project {
             .arg(path)
             .args(args)
             .env("LICGUARD_TODAY", TODAY)
-            .env("LICGUARD_NPM_REGISTRY", &self.registry.url);
+            .env("LICGUARD_NPM_REGISTRY", &self.registry.url)
+            .env("LICGUARD_CACHE_DIR", self.cache.path());
         // The registry is local: a proxy of the machine must not serve it.
         for proxy in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"] {
             cmd.env_remove(proxy).env_remove(proxy.to_lowercase());
@@ -5164,4 +5170,405 @@ fn aliased_dependency_takes_its_license_from_its_installed_copy() {
         let string_width = json_package(&json["packages"], "string-width", "4.2.3");
         assert_eq!(string_width["origin"], "installed", "{fixture}");
     }
+}
+
+/// `project_licensed_by_the_registry` whose registry declares `MIT` for
+/// `ms@2.1.3`; `@types/ms@0.7.34` gets a 404.
+fn project_with_ms_on_the_registry() -> Project {
+    project_licensed_by_the_registry()
+        .with_registry_response("/ms/2.1.3", &[(200, r#"{"name":"ms","license":"MIT"}"#)])
+}
+
+/// How many times `path` was requested from the Project's registry.
+fn requests_for(project: &Project, path: &str) -> usize {
+    project
+        .registry
+        .paths()
+        .iter()
+        .filter(|p| *p == path)
+        .count()
+}
+
+/// What `list --format json`, with `args`, reports for `ms@2.1.3`.
+fn listed_ms(project: &Project, args: &[&str]) -> serde_json::Value {
+    let json = stdout_json(
+        project
+            .list_with(&[&["--format", "json"], args].concat())
+            .success(),
+    );
+    json_package(&json["packages"], "ms", "2.1.3").clone()
+}
+
+#[test]
+fn registry_answer_is_cached_so_a_second_run_makes_no_request() {
+    let project = project_with_ms_on_the_registry();
+    project.check().code(1);
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+    let ms = listed_ms(&project, &[]);
+    assert_eq!(ms["license"], "MIT");
+    assert_eq!(ms["origin"], "registry");
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+}
+
+#[test]
+fn offline_uses_the_cache_when_it_has_the_answer() {
+    let project = project_with_ms_on_the_registry();
+    assert_eq!(listed_ms(&project, &["--offline"])["reason"], "unresolved");
+    listed_ms(&project, &[]);
+    let ms = listed_ms(&project, &["--offline"]);
+    assert_eq!(ms["license"], "MIT");
+    assert_eq!(ms["origin"], "registry");
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+}
+
+#[test]
+fn refresh_requests_the_cached_answers_again_and_rewrites_them() {
+    let project = project_with_ms_on_the_registry();
+    listed_ms(&project, &[]);
+    let project = project.with_registry_response("/ms/2.1.3", &[(200, r#"{"license":"ISC"}"#)]);
+    assert_eq!(listed_ms(&project, &[])["license"], "MIT");
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+    assert_eq!(listed_ms(&project, &["--refresh"])["license"], "ISC");
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 2);
+    assert_eq!(listed_ms(&project, &["--offline"])["license"], "ISC");
+    project.check_with(&["--refresh"]).code(1);
+    project
+        .waive_with(&[&WAIVE_ALL[..], &["--refresh"]].concat())
+        .code(1);
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 4);
+}
+
+#[test]
+fn refresh_and_offline_together_are_a_usage_error() {
+    let project = project_with_ms_on_the_registry();
+    for command in ["check", "list", "waive"] {
+        project
+            .run(command, &["--refresh", "--offline"])
+            .code(2)
+            .stderr(predicate::str::contains("cannot be used with"));
+    }
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+}
+
+#[test]
+fn cache_dir_option_overrides_the_environment_variable() {
+    // The harness sets LICGUARD_CACHE_DIR to the Project's own cache.
+    let project = project_with_ms_on_the_registry();
+    let other = TempDir::new().unwrap();
+    // Created by the first run.
+    let cache_dir = other.path().join("licguard");
+    let cache_dir = cache_dir.to_str().unwrap();
+    listed_ms(&project, &[]);
+    for command in ["check", "list", "waive"] {
+        let args: &[&str] = match command {
+            "waive" => &WAIVE_ALL,
+            _ => &[],
+        };
+        project
+            .run(command, &[args, &["--cache-dir", cache_dir]].concat())
+            .code(predicate::ne(2));
+    }
+    // Only the first run with --cache-dir requested again.
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 2);
+    let ms = listed_ms(
+        &project.with_env("LICGUARD_CACHE_DIR", cache_dir),
+        &["--offline"],
+    );
+    assert_eq!(ms["license"], "MIT");
+}
+
+#[test]
+fn each_registry_has_its_own_cache_entries() {
+    let project = project_with_ms_on_the_registry();
+    listed_ms(&project, &[]);
+    let mirror = Registry::start();
+    mirror.respond("/ms/2.1.3", &[(200, r#"{"license":"ISC"}"#)]);
+    let project = project.with_env("LICGUARD_NPM_REGISTRY", &mirror.url);
+    assert_eq!(listed_ms(&project, &[])["license"], "ISC");
+    assert_eq!(mirror.paths(), ["/@types%2Fms/0.7.34", "/ms/2.1.3"]);
+    // Another spelling of the same registry shares its entries.
+    let url = format!("{}/", mirror.url);
+    let project = project.with_env("LICGUARD_NPM_REGISTRY", &url);
+    assert_eq!(listed_ms(&project, &["--offline"])["license"], "ISC");
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+}
+
+/// The files in the Project's cache directory.
+fn cache_files(project: &Project) -> Vec<PathBuf> {
+    fs::read_dir(project.cache.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect()
+}
+
+/// The lines of `stderr` that are warnings.
+fn warning_lines(assert: &assert_cmd::assert::Assert) -> Vec<String> {
+    String::from_utf8_lossy(&assert.get_output().stderr)
+        .lines()
+        .filter(|line| line.starts_with("warning:"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn corrupt_cache_file_is_ignored_with_a_warning_then_rewritten() {
+    let project = project_with_ms_on_the_registry();
+    listed_ms(&project, &[]);
+    let files = cache_files(&project);
+    assert_eq!(files.len(), 1, "{files:?}");
+    fs::write(&files[0], "{ not json").unwrap();
+    let assert = project.list_with(&["--format", "json"]).success();
+    let warnings = warning_lines(&assert);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("license cache"), "{warnings:?}");
+    assert_eq!(
+        json_package(&stdout_json(assert)["packages"], "ms", "2.1.3")["license"],
+        "MIT"
+    );
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 2);
+    let assert = project
+        .list_with(&["--offline", "--format", "json"])
+        .success();
+    assert_eq!(warning_lines(&assert), Vec::<String>::new());
+    assert_eq!(
+        json_package(&stdout_json(assert)["packages"], "ms", "2.1.3")["license"],
+        "MIT"
+    );
+    assert_eq!(cache_files(&project), files);
+}
+
+#[test]
+fn unwritable_cache_directory_gives_a_warning_and_the_normal_result() {
+    let project = project_with_ms_on_the_registry().write("not-a-directory", "");
+    let file = project.path().join("not-a-directory");
+    let project = project.with_env("LICGUARD_CACHE_DIR", file.to_str().unwrap());
+    // The Violation of the Unresolved `@types/ms`, as without a cache.
+    let assert = project.check().code(1);
+    let warnings = warning_lines(&assert);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("license cache"), "{warnings:?}");
+    assert_eq!(listed_ms(&project, &[])["license"], "MIT");
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 2);
+}
+
+/// Removes the `license` of every entry of a `package-lock.json`.
+fn remove_lockfile_licenses(packages: &mut serde_json::Value) {
+    for entry in packages.as_object_mut().unwrap().values_mut() {
+        entry.as_object_mut().unwrap().remove("license");
+    }
+}
+
+#[test]
+fn only_registry_answers_enter_the_cache() {
+    let license = |name| format!(r#"{{"name":"{name}","license":"MIT"}}"#);
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(&format!("{ALLOW_ALL}{}", clarification("ms", None, "MIT")))
+        .remove("node_modules")
+        .write(
+            "node_modules/wrappy/package.json",
+            r#"{ "name": "wrappy", "version": "1.0.2", "license": "ISC" }"#,
+        )
+        .edit_lockfile(|packages| {
+            for key in [
+                "node_modules/ms",
+                "node_modules/wrappy",
+                "node_modules/once",
+            ] {
+                packages[key].as_object_mut().unwrap().remove("license");
+            }
+            packages["node_modules/once"]["resolved"] = GIT_URL.into();
+        })
+        .with_registry_response("/ms/2.1.3", &[(200, &license("ms"))])
+        .with_registry_response("/wrappy/1.0.2", &[(200, &license("wrappy"))])
+        .with_registry_response("/once/1.4.0", &[(200, &license("once"))]);
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    let origins = [
+        ("ms", "2.1.3"),
+        ("wrappy", "1.0.2"),
+        ("once", "1.4.0"),
+        ("debug", "4.3.4"),
+    ]
+    .map(|(name, version)| json_package(&json["packages"], name, version)["origin"].clone());
+    assert_eq!(
+        origins,
+        [
+            "clarification".into(),
+            "installed".into(),
+            serde_json::Value::Null,
+            "lockfile".into(),
+        ]
+    );
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+    // Without the clarification and the local origins, only the cache could
+    // resolve them offline.
+    let project = project
+        .with_policy(ALLOW_ALL)
+        .remove("node_modules")
+        .edit_lockfile(|packages| {
+            remove_lockfile_licenses(packages);
+            packages["node_modules/once"]["resolved"] =
+                "https://registry.npmjs.org/once/-/once-1.4.0.tgz".into();
+        });
+    let json = stdout_json(
+        project
+            .list_with(&["--offline", "--format", "json"])
+            .success(),
+    );
+    for package in json["packages"].as_array().unwrap() {
+        assert_eq!(package["reason"], "unresolved", "{package}");
+    }
+}
+
+/// The paths of the files under `dir`, relative to it and joined with `/`.
+fn files_under(dir: &Path) -> Vec<String> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().unwrap().is_dir() {
+            files.extend(
+                files_under(&entry.path())
+                    .into_iter()
+                    .map(|file| format!("{name}/{file}")),
+            );
+        } else {
+            files.push(name);
+        }
+    }
+    files
+}
+
+#[test]
+fn cache_defaults_to_licguard_in_the_users_cache_directory() {
+    let home = TempDir::new().unwrap();
+    let mut project = project_with_ms_on_the_registry().without_env("LICGUARD_CACHE_DIR");
+    // Where each platform's standard cache directory is: `~/.cache` or
+    // XDG_CACHE_HOME on Linux, `~/Library/Caches` on macOS, LOCALAPPDATA
+    // on Windows.
+    for (key, dir) in [
+        ("HOME", ""),
+        ("USERPROFILE", ""),
+        ("XDG_CACHE_HOME", "xdg-cache"),
+        ("LOCALAPPDATA", "local-app-data"),
+    ] {
+        project = project.with_env(key, home.path().join(dir).to_str().unwrap());
+    }
+    listed_ms(&project, &[]);
+    let files = files_under(home.path());
+    assert_eq!(files.len(), 1, "{files:?}");
+    let file = &files[0];
+    assert!(
+        [
+            "xdg-cache/licguard/",
+            "Library/Caches/licguard/",
+            "local-app-data/licguard/"
+        ]
+        .iter()
+        .any(|dir| file.starts_with(dir)),
+        "{file}"
+    );
+    assert!(file.ends_with(".json"), "{file}");
+    assert_eq!(listed_ms(&project, &["--offline"])["license"], "MIT");
+    assert_eq!(cache_files(&project), Vec::<PathBuf>::new());
+}
+
+#[test]
+fn help_documents_the_cache() {
+    for command in ["check", "list", "waive"] {
+        Command::cargo_bin("licguard")
+            .unwrap()
+            .args([command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--cache-dir <DIR>"))
+            .stdout(predicate::str::contains("--refresh"))
+            .stdout(predicate::str::contains("LICGUARD_CACHE_DIR=DIR"));
+    }
+}
+
+#[test]
+fn answers_fetched_before_a_registry_failure_are_cached() {
+    // Retried with backoff before it fails for good: `ms` is answered first.
+    let project = project_with_ms_on_the_registry()
+        .with_registry_response("/@types%2Fms/0.7.34", &[(503, "")]);
+    project.check().code(2);
+    assert_eq!(listed_ms(&project, &["--offline"])["license"], "MIT");
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+}
+
+#[test]
+fn registry_404_is_not_cached() {
+    // `@types/ms@0.7.34` gets a 404: a mirror may sync it later.
+    let project = project_with_ms_on_the_registry();
+    listed_ms(&project, &[]);
+    listed_ms(&project, &[]);
+    assert_eq!(requests_for(&project, "/@types%2Fms/0.7.34"), 2);
+}
+
+#[test]
+fn registry_version_without_a_license_is_cached_as_such() {
+    let project = project_licensed_by_the_registry()
+        .with_registry_response("/ms/2.1.3", &[(200, r#"{"name":"ms"}"#)]);
+    listed_ms(&project, &[]);
+    for args in [&[][..], &["--offline"]] {
+        let ms = listed_ms(&project, args);
+        assert_eq!(ms["reason"], "unresolved", "{args:?}");
+        assert_eq!(ms["origin"], serde_json::Value::Null, "{args:?}");
+    }
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+}
+
+/// NF-02: `check` on ~1,500 Packages that only the registry declares a
+/// license for, with a registry that takes 20 ms per request, runs in less
+/// than 2 min cold and 30 s warm. Timing-dependent, so not run by default:
+/// `cargo test --release --test check -- --ignored --nocapture nf_02`.
+#[test]
+#[ignore]
+fn nf_02_benchmark_on_1500_registry_packages_cold_and_warm() {
+    const PACKAGES: usize = 1500;
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .remove("node_modules")
+        .edit_lockfile(|packages| {
+            remove_lockfile_licenses(packages);
+            for i in 0..PACKAGES {
+                let name = format!("pkg-{i:04}");
+                packages[""]["dependencies"][&name] = "^1.0.0".into();
+                packages[format!("node_modules/{name}")] = serde_json::json!({
+                    "version": "1.0.0",
+                    "resolved": format!("https://registry.npmjs.org/{name}/-/{name}-1.0.0.tgz"),
+                });
+            }
+        });
+    let license = r#"{"license":"MIT"}"#;
+    for i in 0..PACKAGES {
+        project
+            .registry
+            .respond(&format!("/pkg-{i:04}/1.0.0"), &[(200, license)]);
+    }
+    for (name, version) in [
+        ("@types%2Fms", "0.7.34"),
+        ("debug", "4.3.4"),
+        ("ms", "2.1.2"),
+        ("ms", "2.1.3"),
+        ("once", "1.4.0"),
+        ("wrappy", "1.0.2"),
+    ] {
+        project
+            .registry
+            .respond(&format!("/{name}/{version}"), &[(200, license)]);
+    }
+    project.registry.delay(Duration::from_millis(20));
+    let start = Instant::now();
+    project.check().success();
+    let cold = start.elapsed();
+    let requests = project.registry.requests().len();
+    assert_eq!(requests, PACKAGES + 6);
+    let start = Instant::now();
+    project.check().success();
+    let warm = start.elapsed();
+    assert_eq!(project.registry.requests().len(), requests);
+    println!("NF-02 on {requests} Packages: cold {cold:.2?}, warm {warm:.2?}");
+    assert!(cold < Duration::from_secs(120), "cold {cold:?}");
+    assert!(warm < Duration::from_secs(30), "warm {warm:?}");
 }

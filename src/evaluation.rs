@@ -2,15 +2,17 @@
 //! disagree: inventory, `dev` filtering, License clarifications, Policy and
 //! Warnings.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use crate::cache::Cache;
 use crate::date::Date;
 use crate::inventory::{
     self, Ecosystem, Inventory, LicenseOrigin, LicensedPackage, Package, Scope,
 };
 use crate::policy::{Policy, Reason, Verdict};
+use crate::registry::Answer;
 use crate::warning::Warning;
 use crate::{clarification, normalize, registry};
 
@@ -69,17 +71,29 @@ impl Evaluation {
     }
 }
 
+/// How the commands that evaluate the Project reach the registry License
+/// origin: its options on the command line.
+#[derive(clap::Args)]
+pub struct Remote {
+    /// Make no network request: Packages that neither a local License origin nor the cache resolves stay Unresolved
+    #[arg(long)]
+    pub offline: bool,
+    /// Ignore the cached registry answers: request them again and rewrite them
+    #[arg(long, conflicts_with = "offline")]
+    pub refresh: bool,
+    /// Keep the license cache in this directory, instead of LICGUARD_CACHE_DIR or the user's cache directory
+    #[arg(long, value_name = "DIR")]
+    pub cache_dir: Option<PathBuf>,
+}
+
 /// Evaluates the Project at `project` against its Policy; `dev` Dependencies
-/// are included when `include_dev` or the Policy says so. With `offline`, no
-/// License origin needs the network.
-pub fn evaluate(project: &Path, include_dev: bool, offline: bool) -> Result<Evaluation> {
+/// are included when `include_dev` or the Policy says so.
+pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Evaluation> {
     let policy = Policy::load(project)?;
     let today = Date::today()?;
     let include_dev = include_dev || policy.include_dev;
     let mut inventory = inventory::inventory(project)?;
-    if !offline {
-        fetch_licenses(&mut inventory, &policy)?;
-    }
+    fetch_licenses(&mut inventory, &policy, remote)?;
     // Matched against the whole inventory: a clarification for an
     // excluded `dev` Dependency still applies to something.
     let mut warnings: Vec<Warning> = policy
@@ -182,9 +196,18 @@ pub fn evaluate(project: &Path, include_dev: bool, offline: bool) -> Result<Eval
 /// Takes from the registry the Declared license of every Package that no
 /// local License origin declares one for and no License clarification
 /// covers, `dev` ones included: Waivers and clarifications are matched
-/// against the whole inventory.
-fn fetch_licenses(inventory: &mut Inventory, policy: &Policy) -> Result<()> {
-    let mut missing: Vec<&mut LicensedPackage> = inventory
+/// against the whole inventory. The registry's answers come from the cache
+/// when it has them and `remote` does not refresh it, else from the network
+/// unless `remote` is offline.
+fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -> Result<()> {
+    // Checked even when no Package needs it, so that a wrong value is
+    // reported at once.
+    let registry = if remote.offline {
+        None
+    } else {
+        Some(registry::url()?)
+    };
+    let missing: Vec<&mut LicensedPackage> = inventory
         .packages
         .iter_mut()
         .filter(|p| match p.package.ecosystem {
@@ -195,13 +218,51 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy) -> Result<()> {
             }
         })
         .collect();
-    let packages: Vec<&Package> = missing.iter().map(|p| &p.package).collect();
-    let licenses = registry::declared_licenses(&packages)?;
-    for (p, license) in missing.iter_mut().zip(licenses) {
-        if license.is_some() {
-            p.declared_license = license;
-            p.license_origin = Some(LicenseOrigin::Registry);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    // The cache belongs to a registry, even offline.
+    let registry = match registry {
+        Some(registry) => registry,
+        None => registry::url()?,
+    };
+    let mut cache = Cache::open(remote.cache_dir.as_deref(), &registry);
+    let mut to_fetch = Vec::new();
+    for p in missing {
+        match cache.get(&p.package).filter(|_| !remote.refresh) {
+            Some(license) => take_license(p, license.clone()),
+            None if !remote.offline => to_fetch.push(p),
+            None => {}
         }
     }
-    Ok(())
+    let packages: Vec<&Package> = to_fetch.iter().map(|p| &p.package).collect();
+    let answers = registry::answers(&registry, &packages);
+    // The first failure in Package order.
+    let mut failure = None;
+    for (p, answer) in to_fetch.into_iter().zip(answers) {
+        match answer {
+            Some(Ok(Answer::Found(license))) => {
+                cache.insert(&p.package, license.clone());
+                take_license(p, license);
+            }
+            // A `404` is not cached: the registry may know the version later.
+            Some(Ok(Answer::NotFound)) | None => {}
+            Some(Err(err)) => {
+                failure.get_or_insert(err);
+            }
+        }
+    }
+    // Even after a failure, so that the next run need not fetch them again.
+    cache.save();
+    failure.map_or(Ok(()), Err)
+}
+
+/// Gives `package` the Declared license the registry declares for it, if
+/// any. A cached one keeps the `registry` origin: the cache only holds what
+/// the registry answered.
+fn take_license(package: &mut LicensedPackage, license: Option<String>) {
+    if license.is_some() {
+        package.declared_license = license;
+        package.license_origin = Some(LicenseOrigin::Registry);
+    }
 }

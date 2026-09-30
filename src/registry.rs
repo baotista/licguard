@@ -43,16 +43,21 @@ struct VersionDocument {
     licenses: Option<serde_json::Value>,
 }
 
-/// Fetches the Declared license of each of `packages` from the npm registry,
-/// in order: `None` when the registry does not know the version or declares
-/// no license for it.
-pub fn declared_licenses(packages: &[&Package]) -> Result<Vec<Option<String>>> {
-    // Checked even when no Package needs it, so that a wrong value is
-    // reported at once.
-    let registry = registry_url()?;
-    let registry = registry.trim_end_matches('/');
+/// What the registry answered for a Package's version.
+pub enum Answer {
+    /// `404`: the registry does not know the version, but may later, e.g. a
+    /// mirror that has not synced it yet.
+    NotFound,
+    /// The version's document, with its Declared license, if any.
+    Found(Option<String>),
+}
+
+/// Fetches the answer of the npm `registry`, as [`url`] returns it, for
+/// each of `packages`, in order: `None` for those left unrequested once a
+/// request failed for good.
+pub fn answers(registry: &str, packages: &[&Package]) -> Vec<Option<Result<Answer>>> {
     if packages.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let agent: Agent = Agent::config_builder()
         .http_status_as_error(false)
@@ -66,7 +71,7 @@ pub fn declared_licenses(packages: &[&Package]) -> Result<Vec<Option<String>>> {
     // new ones once a request has failed for good.
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
-    let results: Mutex<Vec<Option<Result<Option<String>>>>> =
+    let results: Mutex<Vec<Option<Result<Answer>>>> =
         Mutex::new(packages.iter().map(|_| None).collect());
     thread::scope(|scope| {
         for _ in 0..CONCURRENCY.min(packages.len()) {
@@ -85,18 +90,12 @@ pub fn declared_licenses(packages: &[&Package]) -> Result<Vec<Option<String>>> {
             });
         }
     });
-    // The first error in Package order, and all the results otherwise.
-    results
-        .into_inner()
-        .unwrap()
-        .into_iter()
-        .flatten()
-        .collect()
+    results.into_inner().unwrap()
 }
 
 /// The registry to query: `LICGUARD_NPM_REGISTRY` when set, else the
-/// public npm registry.
-fn registry_url() -> Result<String> {
+/// public npm registry, without a trailing slash.
+pub fn url() -> Result<String> {
     let Some(url) = env::var_os(REGISTRY) else {
         return Ok(DEFAULT_REGISTRY.to_string());
     };
@@ -106,12 +105,12 @@ fn registry_url() -> Result<String> {
             "{REGISTRY} `{url}` is not an http:// or https:// URL\nhint: set it to the URL of an npm registry, e.g. `{DEFAULT_REGISTRY}`, or unset it"
         );
     }
-    Ok(url.into_owned())
+    Ok(url.trim_end_matches('/').to_string())
 }
 
 /// Fetches the Declared license of `package`, retrying connection errors,
 /// timeouts, `429` and `5xx` answers with backoff.
-fn fetch(agent: &Agent, registry: &str, package: &Package) -> Result<Option<String>> {
+fn fetch(agent: &Agent, registry: &str, package: &Package) -> Result<Answer> {
     let url = format!(
         "{registry}/{}/{}",
         encode(&package.name),
@@ -123,10 +122,10 @@ fn fetch(agent: &Agent, registry: &str, package: &Package) -> Result<Option<Stri
         let failure = match agent.get(&url).call() {
             Ok(mut response) => match response.status().as_u16() {
                 200 => match response.body_mut().read_to_string() {
-                    Ok(body) => return parse(&body, registry, &what),
+                    Ok(body) => return parse(&body, registry, &what).map(Answer::Found),
                     Err(err) => err.to_string(),
                 },
-                404 => return Ok(None),
+                404 => return Ok(Answer::NotFound),
                 status @ (429 | 500..=599) => format!("status {status}"),
                 status => bail!(
                     "the npm registry {registry} answered status {status} for {what}\n{ANSWER_HINT}"
