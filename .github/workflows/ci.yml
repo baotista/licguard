@@ -20,3 +20,30 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # Builds the container image from a musl binary, as the publish-container
+  # workflow does from the released one, and runs it on a fixture Project.
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - run: |
+          mkdir -p context/linux/amd64
+          cp target/x86_64-unknown-linux-musl/release/licguard context/linux/amd64/
+          docker build --platform linux/amd64 --file Dockerfile --tag licguard:ci context
+      - run: docker run --rm licguard:ci --version
+      - name: The image checks a Project mounted at /work
+        run: |
+          set +e
+          docker run --rm -v "$PWD/tests/fixtures/action:/work" licguard:ci check
+          code=$?
+          if [ "$code" -ne 1 ]; then
+            echo "::error::licguard should have exited with code 1 on the fixture's Violation, not $code"
+            exit 1
+          fi

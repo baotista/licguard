@@ -5,6 +5,12 @@ edition = "2024"
 description = "Check the licenses of your project's dependencies against your license policy"
 license = "Apache-2.0"
 repository = "https://github.com/baotista/licguard"
+homepage = "https://github.com/baotista/licguard"
+readme = "README.md"
+keywords = ["license", "compliance", "spdx", "npm", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+# The crate ships the sources only, not the tests and their fixtures.
+include = ["/src", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 anyhow = "1.0.104"
