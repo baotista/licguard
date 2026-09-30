@@ -1,0 +1,31 @@
+# Publishes the crate to crates.io. A custom publish job of dist, called by
+# the Release workflow (see `publish-jobs` in dist-workspace.toml) after the
+# GitHub Release is created; dist skips it for prerelease tags.
+#
+# Needs the CARGO_REGISTRY_TOKEN secret: a crates.io API token with the
+# `publish-update` scope (and `publish-new` for the very first release).
+
+name: Publish to crates.io
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: The dist manifest of the release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

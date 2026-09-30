@@ -1,0 +1,57 @@
+# Self-test of the GitHub Action (action.yml at the repository root): runs it
+# from this checkout, building licguard from source, on a fixture Project
+# with a Violation.
+
+name: Action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Observation mode succeeds despite the Violation
+        uses: ./
+        with:
+          version: source
+          path: tests/fixtures/action
+          observe: true
+
+      - name: Gate mode fails on the Violation
+        id: gate
+        continue-on-error: true
+        uses: ./
+        with:
+          version: source
+          path: tests/fixtures/action
+
+      - name: Assert the gate failed
+        if: steps.gate.outcome != 'failure'
+        shell: bash
+        run: |
+          echo "::error::The gate mode step should have failed, its outcome is ${{ steps.gate.outcome }}"
+          exit 1
+
+      - name: Assert the job summary is not empty
+        shell: bash
+        run: |
+          # The runner keeps each step's summary in a file there until the
+          # end of the job.
+          if ! grep -l '^## licguard' "$RUNNER_TEMP"/_runner_file_commands/step_summary_*; then
+            echo "::error::No licguard job summary was written"
+            exit 1
+          fi

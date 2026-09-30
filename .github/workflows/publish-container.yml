@@ -1,0 +1,67 @@
+# Publishes the container image ghcr.io/baotista/licguard for linux/amd64 and
+# linux/arm64, tagged with the version and `latest`. A custom publish job of
+# dist, called by the Release workflow (see `publish-jobs` in
+# dist-workspace.toml) after the GitHub Release is created; dist skips it for
+# prerelease tags.
+#
+# The image copies the released musl binaries (see the Dockerfile), so it
+# ships exactly what the GitHub Release ships. It pushes with GITHUB_TOKEN.
+
+name: Publish the container image
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        description: The dist manifest of the release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      TAG: ${{ fromJson(inputs.plan).announcement_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Lay out the released musl binaries by platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pair in amd64:x86_64 arm64:aarch64; do
+            arch="${pair%%:*}"
+            archive="licguard-${pair##*:}-unknown-linux-musl.tar.xz"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP" --pattern "$archive" --pattern "$archive.sha256"
+            (cd "$RUNNER_TEMP" && sha256sum --check "$archive.sha256")
+            mkdir -p "context/linux/$arch"
+            tar -xJf "$RUNNER_TEMP/$archive" -C "context/linux/$arch" --strip-components=1
+          done
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: context
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.VERSION }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.description=Check the licenses of your project's dependencies against your license policy

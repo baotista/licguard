@@ -1,0 +1,150 @@
+name: licguard
+description: Check the licenses of your project's dependencies against your license policy, with annotations and a job summary
+author: baotista
+
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  version:
+    description: >-
+      The licguard release to install: a tag like `v0.1.0`, or `latest`.
+      `source` builds licguard from the action's own checkout instead, with
+      `cargo build --release`; it exists for the CI of the licguard repository.
+    default: latest
+  path:
+    description: The Project directory, the one holding `licguard.toml`
+    default: .
+  args:
+    description: >-
+      Extra arguments to `licguard check`, split on whitespace, e.g.
+      `--strict --include-dev`
+    default: ''
+  observe:
+    description: >-
+      `true` runs in observation mode: Violations are still annotated and
+      summarized, but the step never fails
+    default: 'false'
+  token:
+    description: The token used to call the GitHub API to resolve `latest`
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install licguard
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        TOKEN: ${{ inputs.token }}
+        RUNNER_OS_NAME: ${{ runner.os }}
+        RUNNER_ARCH_NAME: ${{ runner.arch }}
+        CACHE_DIR: ${{ runner.temp }}/licguard-cache
+      run: |
+        set -euo pipefail
+        repo=baotista/licguard
+
+        # The license cache, restored and saved by the next step.
+        mkdir -p "$CACHE_DIR"
+        echo "LICGUARD_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+
+        if [ "$VERSION" = source ]; then
+          echo "Building licguard from $GITHUB_ACTION_PATH"
+          cargo build --release --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+          echo "$GITHUB_ACTION_PATH/target/release" >> "$GITHUB_PATH"
+          exit 0
+        fi
+
+        case "$RUNNER_OS_NAME/$RUNNER_ARCH_NAME" in
+          Linux/X64) target=x86_64-unknown-linux-musl; ext=tar.xz ;;
+          Linux/ARM64) target=aarch64-unknown-linux-musl; ext=tar.xz ;;
+          macOS/X64) target=x86_64-apple-darwin; ext=tar.xz ;;
+          macOS/ARM64) target=aarch64-apple-darwin; ext=tar.xz ;;
+          Windows/X64) target=x86_64-pc-windows-msvc; ext=zip ;;
+          *)
+            echo "::error title=licguard::No licguard release for $RUNNER_OS_NAME/$RUNNER_ARCH_NAME. Supported runners: Linux X64 and ARM64, macOS X64 and ARM64, Windows X64."
+            exit 1
+            ;;
+        esac
+
+        if [ "$VERSION" = latest ]; then
+          VERSION=$(curl -fsSL --retry 3 \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$repo/releases/latest" |
+            sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p') || VERSION=
+          if [ -z "$VERSION" ]; then
+            echo "::error title=licguard::Cannot resolve the latest licguard release of $repo. Set the \`version\` input to a release tag like v0.1.0."
+            exit 1
+          fi
+        fi
+
+        archive="licguard-$target.$ext"
+        url="https://github.com/$repo/releases/download/$VERSION/$archive"
+        dest="$RUNNER_TEMP/licguard-$VERSION"
+        rm -rf "$dest"
+        mkdir -p "$dest"
+        echo "Installing licguard $VERSION from $url"
+        if ! curl -fsSL --retry 3 -o "$dest/$archive" "$url" ||
+          ! curl -fsSL --retry 3 -o "$dest/$archive.sha256" "$url.sha256"; then
+          echo "::error title=licguard::Cannot download $url or its .sha256. Check that the \`version\` input names an existing licguard release."
+          exit 1
+        fi
+
+        expected=$(cut -d ' ' -f 1 < "$dest/$archive.sha256")
+        # Hashing stdin, as sha256sum escapes a file name with backslashes.
+        if command -v sha256sum > /dev/null; then
+          actual=$(sha256sum < "$dest/$archive" | cut -d ' ' -f 1)
+        else
+          actual=$(shasum -a 256 < "$dest/$archive" | cut -d ' ' -f 1)
+        fi
+        if [ "$actual" != "$expected" ]; then
+          echo "::error title=licguard::Checksum mismatch for $archive: expected $expected, got $actual. The download is corrupt or was tampered with."
+          exit 1
+        fi
+
+        if [ "$ext" = zip ]; then
+          unzip -q "$dest/$archive" -d "$dest"
+        else
+          tar -xJf "$dest/$archive" -C "$dest"
+        fi
+        bin=$(find "$dest" -type f \( -name licguard -o -name licguard.exe \) | head -n 1)
+        echo "$(dirname "$bin")" >> "$GITHUB_PATH"
+
+    - name: Restore the license cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/licguard-cache
+        key: licguard-${{ runner.os }}-${{ hashFiles(format('{0}/**/package-lock.json', inputs.path), format('{0}/**/yarn.lock', inputs.path), format('{0}/**/pnpm-lock.yaml', inputs.path)) }}
+        restore-keys: licguard-${{ runner.os }}-
+
+    - name: Check licenses
+      shell: bash
+      env:
+        PROJECT: ${{ inputs.path }}
+        ARGS: ${{ inputs.args }}
+        OBSERVE: ${{ inputs.observe }}
+      run: |
+        set -uo pipefail
+        case "$OBSERVE" in
+          true | false) ;;
+          *)
+            echo "::error title=licguard::The \`observe\` input must be true or false, not \`$OBSERVE\`."
+            exit 1
+            ;;
+        esac
+
+        # ARGS is split on whitespace, without glob expansion. GitHub runs
+        # bash with -e, which would exit on licguard's failure.
+        set -f +e
+        # shellcheck disable=SC2086
+        licguard check --format github $ARGS "$PROJECT"
+        code=$?
+        set +f -e
+
+        if [ "$OBSERVE" = true ]; then
+          echo "::notice title=licguard::Observation mode: the license gate does not fail this step (licguard exited with code $code). Set \`observe: false\` to enforce the Policy."
+          exit 0
+        fi
+        exit "$code"
