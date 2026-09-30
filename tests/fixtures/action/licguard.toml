@@ -1,0 +1,8 @@
+# The Policy of the Project checked by the GitHub Action's self-test
+# (.github/workflows/action.yml): `copyleft-lib` is a Violation.
+
+[policy]
+allow = ["MIT"]
+deny = ["GPL-3.0-only"]
+unresolved = "deny"
+unlisted = "review"
