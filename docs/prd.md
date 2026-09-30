@@ -165,9 +165,9 @@ In priority order:
 
 1. License clarification.
 2. Installed package (`node_modules`), **only if its version matches the Inventory source exactly**; a mismatching copy is skipped (Warning in `--verbose`: "run `npm install`").
-3. The Inventory source itself, when it records licenses (npm v2/v3 lockfiles copy each entry's `license` from the registry at install time). `yarn.lock` records none, so a Yarn Package's only local origin is its installed copy, anywhere under the `node_modules` of the lockfile's directory or of a Workspace member. A Berry Project in Plug'n'Play mode has no `node_modules`: its Packages stay Unresolved until the registry origin is available. `pnpm-lock.yaml` records none either: a pnpm Package's only local origin is its installed copy in the virtual store next to the lockfile, `node_modules/.pnpm/<name>@<version>[_<peers>]/node_modules/<name>` (with `@scope/pkg` stored as `@scope+pkg`); without it, the Package stays Unresolved until the registry origin is available.
-4. Cache.
-5. Registry.
+3. The Inventory source itself, when it records licenses (npm v2/v3 lockfiles copy each entry's `license` from the registry at install time). `yarn.lock` records none, so a Yarn Package's only local origin is its installed copy, anywhere under the `node_modules` of the lockfile's directory or of a Workspace member. A Berry Project in Plug'n'Play mode has no `node_modules`: its Packages take their license from the registry. `pnpm-lock.yaml` records none either: a pnpm Package's only local origin is its installed copy in the virtual store next to the lockfile, `node_modules/.pnpm/<name>@<version>[_<peers>]/node_modules/<name>` (with `@scope/pkg` stored as `@scope+pkg`); without it, the Package takes its license from the registry.
+4. Cache (#8).
+5. Registry: the npm registry's metadata for the Package's exact version, `GET {registry}/{name}/{version}` with a scoped name encoded as npm does (`@scope%2Fpkg`), read like an installed `package.json` (`license`, else the legacy `licenses`). The registry is `https://registry.npmjs.org`, or the one `LICGUARD_NPM_REGISTRY` names (for tests and mirrors, until NF-06 brings `.npmrc` support). It is queried, after the whole inventory is aggregated, once per distinct Package that no earlier origin declares a license for and no License clarification covers, `dev` ones included, as Waivers and clarifications are matched against the whole inventory. At most 16 requests are in flight (NF-05), each with a 30 s timeout; connection errors, timeouts, `429` and `5xx` answers are retried with exponential backoff, 3 attempts in all. A `404`, or a version that declares no license, leaves the Package Unresolved; any other answer, or a failure after the retries, is a runtime error (exit 2) that names the registry and the Package. Requests carry only the name and version, a `User-Agent: licguard/<version>` and an `Accept: application/json` header: no cookie, no credential, no project data (NF-07).
 
 The first origin that declares a license wins, even if that Declared license later turns out Unresolved. The Inventory source is the single source of truth for which Packages exist; installed packages only supply metadata. Because lockfiles record licenses, `check` works on a fresh clone without `npm install`, and optional packages for other platforms (e.g. `@esbuild/linux-x64` on macOS), which are never installed locally, still get their license. With `--offline`, a Package that no local origin can resolve is Unresolved (Verdict per `unresolved`). Without `--offline`, an unreachable registry with no cache entry is a runtime error (exit 2).
 
@@ -253,7 +253,7 @@ flowchart LR
 | Serialization | `serde`, `serde_json`, `toml`, `serde_yaml_ng` |
 | SPDX expressions | `spdx` |
 | Text detection (P2) | `askalono` |
-| Concurrent HTTP | `reqwest`, `tokio` |
+| HTTP | `ureq` (blocking, rustls TLS, no OpenSSL for the static musl builds); concurrency is bounded with a few `std` threads, as no async runtime is needed |
 | POM / SBOM XML (P1) | `quick-xml` |
 | Terminal rendering | `comfy-table`, `owo-colors` |
 | Errors | `miette`, or `anyhow` + `thiserror` |

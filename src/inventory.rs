@@ -183,6 +183,8 @@ pub enum LicenseOrigin {
     Installed,
     /// The Inventory source itself.
     Lockfile,
+    /// The npm registry's metadata for the Package's version.
+    Registry,
 }
 
 impl LicenseOrigin {
@@ -191,6 +193,7 @@ impl LicenseOrigin {
             LicenseOrigin::Clarification => "clarification",
             LicenseOrigin::Installed => "installed",
             LicenseOrigin::Lockfile => "lockfile",
+            LicenseOrigin::Registry => "registry",
         }
     }
 }

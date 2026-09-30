@@ -7,10 +7,12 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::date::Date;
-use crate::inventory::{self, LicenseOrigin, Package, Scope};
+use crate::inventory::{
+    self, Ecosystem, Inventory, LicenseOrigin, LicensedPackage, Package, Scope,
+};
 use crate::policy::{Policy, Reason, Verdict};
 use crate::warning::Warning;
-use crate::{clarification, normalize};
+use crate::{clarification, normalize, registry};
 
 /// The evaluated Packages of a Project.
 pub struct Evaluation {
@@ -68,12 +70,16 @@ impl Evaluation {
 }
 
 /// Evaluates the Project at `project` against its Policy; `dev` Dependencies
-/// are included when `include_dev` or the Policy says so.
-pub fn evaluate(project: &Path, include_dev: bool) -> Result<Evaluation> {
+/// are included when `include_dev` or the Policy says so. With `offline`, no
+/// License origin needs the network.
+pub fn evaluate(project: &Path, include_dev: bool, offline: bool) -> Result<Evaluation> {
     let policy = Policy::load(project)?;
     let today = Date::today()?;
     let include_dev = include_dev || policy.include_dev;
-    let inventory = inventory::inventory(project)?;
+    let mut inventory = inventory::inventory(project)?;
+    if !offline {
+        fetch_licenses(&mut inventory, &policy)?;
+    }
     // Matched against the whole inventory: a clarification for an
     // excluded `dev` Dependency still applies to something.
     let mut warnings: Vec<Warning> = policy
@@ -171,4 +177,30 @@ pub fn evaluate(project: &Path, include_dev: bool) -> Result<Evaluation> {
         evaluated,
         warnings,
     })
+}
+
+/// Takes from the registry the Declared license of every Package that no
+/// local License origin declares one for and no License clarification
+/// covers, `dev` ones included: Waivers and clarifications are matched
+/// against the whole inventory.
+fn fetch_licenses(inventory: &mut Inventory, policy: &Policy) -> Result<()> {
+    let mut missing: Vec<&mut LicensedPackage> = inventory
+        .packages
+        .iter_mut()
+        .filter(|p| match p.package.ecosystem {
+            Ecosystem::Npm => {
+                p.declared_license.is_none()
+                    && clarification::find(&policy.clarifications, &p.package).is_none()
+            }
+        })
+        .collect();
+    let packages: Vec<&Package> = missing.iter().map(|p| &p.package).collect();
+    let licenses = registry::declared_licenses(&packages)?;
+    for (p, license) in missing.iter_mut().zip(licenses) {
+        if license.is_some() {
+            p.declared_license = license;
+            p.license_origin = Some(LicenseOrigin::Registry);
+        }
+    }
+    Ok(())
 }

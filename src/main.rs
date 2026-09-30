@@ -7,6 +7,7 @@ mod inventory;
 mod json;
 mod normalize;
 mod policy;
+mod registry;
 mod report;
 mod table;
 mod waive;
@@ -29,13 +30,15 @@ struct Cli {
     command: Command,
 }
 
-/// The help text of the commands that evaluate Waivers.
-const TODAY_HELP: &str = "Waiver expiry is evaluated as of today (local date); set LICGUARD_TODAY=YYYY-MM-DD to evaluate it as of another date, e.g. to re-run an old CI job.";
+/// The help text of the commands that evaluate the Project.
+const EVALUATION_HELP: &str = "Waiver expiry is evaluated as of today (local date); set LICGUARD_TODAY=YYYY-MM-DD to evaluate it as of another date, e.g. to re-run an old CI job.
+
+Packages that no local License origin declares a license for get it from the npm registry, https://registry.npmjs.org, unless --offline; set LICGUARD_NPM_REGISTRY=URL to query another one, e.g. a mirror.";
 
 #[derive(Subcommand)]
 enum Command {
     /// Evaluate the Project against its Policy and set the exit code
-    #[command(after_help = TODAY_HELP)]
+    #[command(after_help = EVALUATION_HELP)]
     Check {
         /// Project directory
         #[arg(default_value = ".")]
@@ -52,9 +55,12 @@ enum Command {
         /// Write the report to this file instead of stdout
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
+        /// Make no network request: Packages without a local License origin stay Unresolved
+        #[arg(long)]
+        offline: bool,
     },
     /// Show every Package with its license, Verdict and License origin
-    #[command(after_help = TODAY_HELP)]
+    #[command(after_help = EVALUATION_HELP)]
     List {
         /// Project directory
         #[arg(default_value = ".")]
@@ -71,6 +77,9 @@ enum Command {
         /// Write the inventory to this file instead of stdout
         #[arg(long, value_name = "FILE")]
         output: Option<PathBuf>,
+        /// Make no network request: Packages without a local License origin stay Unresolved
+        #[arg(long)]
+        offline: bool,
     },
     /// Write a neutral template Policy to the Project's licguard.toml
     Init {
@@ -82,7 +91,7 @@ enum Command {
         force: bool,
     },
     /// Write a Waiver to licguard.toml for each current Violation
-    #[command(after_help = TODAY_HELP)]
+    #[command(after_help = EVALUATION_HELP)]
     Waive {
         /// Project directory
         #[arg(default_value = ".")]
@@ -102,6 +111,9 @@ enum Command {
         /// Also evaluate `dev` Dependencies
         #[arg(long)]
         include_dev: bool,
+        /// Make no network request: Packages without a local License origin stay Unresolved
+        #[arg(long)]
+        offline: bool,
     },
 }
 
@@ -137,8 +149,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
             include_dev,
             format,
             output,
+            offline,
         } => {
-            let evaluation = evaluation::evaluate(&path, include_dev)?;
+            let evaluation = evaluation::evaluate(&path, include_dev, offline)?;
             let violated = evaluation
                 .evaluated
                 .iter()
@@ -164,13 +177,14 @@ fn run(cli: Cli) -> Result<ExitCode> {
             format,
             group_by,
             output,
+            offline,
         } => {
             if matches!(format, ListFormat::Json) && group_by.is_some() {
                 bail!(
                     "`--group-by` applies only to `--format table`\nhint: remove `--group-by`; JSON consumers can group the packages themselves"
                 );
             }
-            let evaluation = evaluation::evaluate(&path, include_dev)?;
+            let evaluation = evaluation::evaluate(&path, include_dev, offline)?;
             let out = match format {
                 ListFormat::Table => table::table(&evaluation, group_by),
                 ListFormat::Json => json::list(&evaluation),
@@ -189,6 +203,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             expires,
             strict,
             include_dev,
+            offline,
         } => waive::waive(
             &path,
             all_violations,
@@ -196,6 +211,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             expires.as_deref(),
             strict,
             include_dev,
+            offline,
         ),
     }
 }

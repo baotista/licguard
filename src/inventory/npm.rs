@@ -241,7 +241,7 @@ pub(super) fn installed_license(dir: &Path, version: &str) -> Option<String> {
 
 /// The Declared license of a manifest or lockfile entry: its `license`
 /// field, else the legacy `licenses` field.
-fn declared_license(
+pub(crate) fn declared_license(
     license: Option<&serde_json::Value>,
     licenses: Option<&serde_json::Value>,
 ) -> Option<String> {
