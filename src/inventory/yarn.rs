@@ -190,14 +190,19 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
 
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for (index, entry) in lockfile.entries.iter().enumerate() {
+        // An aliased Package is installed under its alias, e.g.
+        // `node_modules/string-width-cjs` for `string-width`.
+        let mut names: Vec<&str> = vec![&entry.name];
+        names.extend(entry.descriptors.iter().map(|d| descriptor_name(d)));
+        names.dedup();
         let package = Package {
             ecosystem: Ecosystem::Npm,
             name: entry.name.clone(),
             version: entry.version.clone(),
         };
-        let declared_license = installed
-            .get(&entry.name)
-            .into_iter()
+        let declared_license = names
+            .iter()
+            .filter_map(|name| installed.get(*name))
             .flatten()
             .find_map(|dir| npm::installed_license(dir, &entry.version));
         let (introduction_path, scope) = match introduction_paths.get(&Node::Entry(index)) {
@@ -245,6 +250,16 @@ fn descriptor_name(descriptor: &str) -> &str {
         .find(|(_, c)| *c == '@')
         .map_or(descriptor.len(), |(at, _)| at);
     &descriptor[..at]
+}
+
+/// The real Package name of an aliased descriptor:
+/// `string-width-cjs@npm:string-width@^4.2.0` -> `string-width`; `None`
+/// for any other descriptor, e.g. `ms@npm:^2.1.3`.
+fn aliased_name(descriptor: &str) -> Option<&str> {
+    let range = &descriptor[descriptor_name(descriptor).len()..];
+    let target = range.strip_prefix("@npm:")?;
+    let name = descriptor_name(target);
+    (!name.is_empty() && name.len() < target.len()).then_some(name)
 }
 
 fn manifest(dir: &Path) -> Result<Manifest> {

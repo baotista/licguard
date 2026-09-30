@@ -108,7 +108,9 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         };
         let package = Package {
             ecosystem: Ecosystem::Npm,
-            name: name.to_string(),
+            // An aliased entry, e.g. `node_modules/string-width-cjs`, names
+            // the real Package, e.g. `string-width`.
+            name: entry.name.as_deref().unwrap_or(name).to_string(),
             version: version.clone(),
         };
         let (declared_license, license_origin) = installed_license(&root.join(key), version)

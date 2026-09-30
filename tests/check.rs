@@ -86,6 +86,13 @@ impl Project {
         self
     }
 
+    fn append(self, file: &str, contents: &str) -> Self {
+        let path = self.dir.path().join(file);
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(path, text + contents).unwrap();
+        self
+    }
+
     fn remove(self, relative: &str) -> Self {
         let path = self.dir.path().join(relative);
         if path.is_dir() {
@@ -5071,4 +5078,90 @@ fn package_is_from_the_registry_only_if_every_inventory_source_says_so() {
         "unresolved"
     );
     assert_eq!(project.registry.paths(), Vec::<String>::new());
+}
+
+/// Adds the aliased dependency `string-width-cjs`, i.e.
+/// `npm:string-width@^4.2.0`, resolved to `string-width@4.2.3`, to the
+/// root of the fixture Project.
+fn with_aliased_string_width(fixture: &str) -> Project {
+    let project = Project::from_fixture(fixture)
+        .with_policy(ALLOW_ALL)
+        .remove("node_modules");
+    let dependency = r#""string-width-cjs": "npm:string-width@^4.2.0""#;
+    match fixture {
+        "npm-basic" => project.edit_lockfile(|packages| {
+            packages[""]["dependencies"]["string-width-cjs"] = "npm:string-width@^4.2.0".into();
+            packages["node_modules/string-width-cjs"] = serde_json::json!({
+                "name": "string-width",
+                "version": "4.2.3",
+                "resolved": "https://registry.npmjs.org/string-width/-/string-width-4.2.3.tgz",
+            });
+        }),
+        "yarn-v1" => project
+            .replace_in(
+                "package.json",
+                r#""once":"^1.4.0""#,
+                &format!(r#""once":"^1.4.0",{dependency}"#),
+            )
+            .append(
+                "yarn.lock",
+                "\n\"string-width-cjs@npm:string-width@^4.2.0\":\n  version \"4.2.3\"\n  resolved \"https://registry.yarnpkg.com/string-width/-/string-width-4.2.3.tgz#269c7117d27b05ad2e536830a8ec895ef9c6d010\"\n  integrity sha512-x\n",
+            ),
+        "yarn-berry" => project
+            .replace_in(
+                "package.json",
+                r#""once": "^1.4.0""#,
+                &format!(r#""once": "^1.4.0", {dependency}"#),
+            )
+            .append(
+                "yarn.lock",
+                "\n\"string-width-cjs@npm:string-width@^4.2.0\":\n  version: 4.2.3\n  resolution: \"string-width@npm:4.2.3\"\n  checksum: 10c0/x\n  languageName: node\n  linkType: hard\n",
+            ),
+        _ => unreachable!("{fixture}"),
+    }
+}
+
+const ALIAS_FIXTURES: [&str; 3] = ["npm-basic", "yarn-v1", "yarn-berry"];
+
+#[test]
+fn aliased_dependency_is_the_real_package_and_is_requested_under_its_name() {
+    for fixture in ALIAS_FIXTURES {
+        let project = with_aliased_string_width(fixture)
+            .with_registry_response("/string-width/4.2.3", &[(200, r#"{"license":"MIT"}"#)]);
+        let json = stdout_json(project.list_with(&["--format", "json"]).success());
+        let packages = json["packages"].as_array().unwrap();
+        assert!(
+            !packages.iter().any(|p| p["name"] == "string-width-cjs"),
+            "{fixture}"
+        );
+        let string_width = json_package(&json["packages"], "string-width", "4.2.3");
+        assert_eq!(string_width["origin"], "registry", "{fixture}");
+        assert_eq!(
+            string_width["introduction_path"],
+            serde_json::json!(["app", "string-width-cjs"]),
+            "{fixture}"
+        );
+        let paths = project.registry.paths();
+        assert!(
+            paths.contains(&"/string-width/4.2.3".to_string()),
+            "{fixture}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("cjs")),
+            "{fixture}: {paths:?}"
+        );
+    }
+}
+
+#[test]
+fn aliased_dependency_takes_its_license_from_its_installed_copy() {
+    for fixture in ALIAS_FIXTURES {
+        let project = with_aliased_string_width(fixture).write(
+            "node_modules/string-width-cjs/package.json",
+            r#"{ "name": "string-width", "version": "4.2.3", "license": "MIT" }"#,
+        );
+        let json = stdout_json(project.list_with(&["--format", "json"]).success());
+        let string_width = json_package(&json["packages"], "string-width", "4.2.3");
+        assert_eq!(string_width["origin"], "installed", "{fixture}");
+    }
 }
