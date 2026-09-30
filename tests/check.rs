@@ -4976,29 +4976,29 @@ fn npm_package_from_any_registry_or_without_resolved_is_requested() {
 
 #[test]
 fn yarn_package_not_from_a_registry_is_not_requested_and_stays_unresolved() {
-    let v1 = r#"  resolved "https://registry.npmjs.org/once/-/once-1.4.0.tgz#583b1aa775961d4b113ac17d9c50baef9dd76bd1"
-"#;
-    let berry = "  resolution: \"once@npm:1.4.0\"\n";
+    // No line ends: the fixtures may be checked out with CRLF.
+    let v1 = r#"  resolved "https://registry.npmjs.org/once/-/once-1.4.0.tgz#583b1aa775961d4b113ac17d9c50baef9dd76bd1""#;
+    let berry = "  resolution: \"once@npm:1.4.0\"";
     let cases = [
-        ("yarn-v1", v1, format!("  resolved \"{GIT_URL}\"\n")),
-        ("yarn-v1", v1, format!("  resolved \"{CODELOAD_URL}\"\n")),
-        ("yarn-v1", v1, format!("  resolved \"{TARBALL_URL}\"\n")),
-        ("yarn-v1", v1, format!("  resolved \"{FILE_URL}\"\n")),
+        ("yarn-v1", v1, format!("  resolved \"{GIT_URL}\"")),
+        ("yarn-v1", v1, format!("  resolved \"{CODELOAD_URL}\"")),
+        ("yarn-v1", v1, format!("  resolved \"{TARBALL_URL}\"")),
+        ("yarn-v1", v1, format!("  resolved \"{FILE_URL}\"")),
         ("yarn-v1", v1, String::new()),
         (
             "yarn-berry",
             berry,
-            "  resolution: \"once@https://github.com/isaacs/once.git#commit=0e614d9\"\n".into(),
+            "  resolution: \"once@https://github.com/isaacs/once.git#commit=0e614d9\"".into(),
         ),
         (
             "yarn-berry",
             berry,
-            format!("  resolution: \"once@{TARBALL_URL}\"\n"),
+            format!("  resolution: \"once@{TARBALL_URL}\""),
         ),
         (
             "yarn-berry",
             berry,
-            "  resolution: \"once@file:../once-1.4.0.tgz::locator=app%40workspace%3A.\"\n".into(),
+            "  resolution: \"once@file:../once-1.4.0.tgz::locator=app%40workspace%3A.\"".into(),
         ),
     ];
     for (fixture, from, to) in cases {
