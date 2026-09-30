@@ -83,6 +83,17 @@ fn find_lockfiles(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result
     Ok(())
 }
 
+/// Whether `url` is an `http(s)` URL with npm's registry tarball layout,
+/// `…/<name>/-/<file>.tgz`, on any host, so that mirrors count; a query or
+/// fragment, e.g. Yarn's `#<sha1>`, is ignored.
+fn is_registry_tarball(url: &str) -> bool {
+    let url = url.split(['#', '?']).next().unwrap_or(url);
+    (url.starts_with("https://") || url.starts_with("http://"))
+        && url
+            .rsplit_once("/-/")
+            .is_some_and(|(_, file)| !file.contains('/') && file.ends_with(".tgz"))
+}
+
 /// A published artifact identified by ecosystem, name and version.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Package {
@@ -112,6 +123,11 @@ pub struct LicensedPackage {
     pub declared_license: Option<String>,
     /// Where the Declared license came from; `None` when there is none.
     pub license_origin: Option<LicenseOrigin>,
+    /// Whether every Inventory source says the Package comes from an npm
+    /// registry, so that the registry's metadata describes it: a git,
+    /// tarball or local dependency may differ from the registry Package of
+    /// the same name and version.
+    pub from_registry: bool,
     pub scope: Scope,
     /// Package names from a root (the Project root or a Workspace member) to
     /// this Package; `None` when it is not reachable from any root.
@@ -131,6 +147,7 @@ impl LicensedPackage {
     /// Within the `same_source`, the shortest path with that Scope wins, and
     /// the line follows the path.
     fn merge(&mut self, other: LicensedPackage, same_source: bool) {
+        self.from_registry &= other.from_registry;
         for source in other.sources {
             if !self.sources.contains(&source) {
                 self.sources.push(source);

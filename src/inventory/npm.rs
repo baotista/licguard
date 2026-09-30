@@ -25,6 +25,9 @@ struct Lockfile {
 struct LockEntry {
     name: Option<String>,
     version: Option<String>,
+    /// Where npm fetched it from; `None` in some lockfiles, e.g. written with
+    /// `--package-lock-only`.
+    resolved: Option<String>,
     license: Option<serde_json::Value>,
     licenses: Option<serde_json::Value>,
     #[serde(default)]
@@ -118,6 +121,10 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         let found = LicensedPackage {
             declared_license,
             license_origin,
+            from_registry: entry
+                .resolved
+                .as_deref()
+                .is_none_or(super::is_registry_tarball),
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
             introduction_path: introduction_paths.get(key).map(|(path, _)| path.clone()),
             sources: vec![source.to_string()],

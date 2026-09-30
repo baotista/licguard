@@ -4903,3 +4903,172 @@ fn registry_override_that_is_not_an_http_url_is_a_runtime_error() {
         project.check_with(&["--offline"]).success();
     }
 }
+
+/// Where a dependency that is not from an npm registry comes from: a git
+/// repository, a tarball URL outside the registry layout, a local file.
+const GIT_URL: &str =
+    "git+ssh://git@github.com/isaacs/once.git#0e614d9f5a7e6f0305c625f6b581f6d80b33b8a6";
+const CODELOAD_URL: &str =
+    "https://codeload.github.com/isaacs/once/tar.gz/0e614d9f5a7e6f0305c625f6b581f6d80b33b8a6";
+const TARBALL_URL: &str = "https://example.com/once-1.4.0.tgz";
+const FILE_URL: &str = "file:../once-1.4.0.tgz";
+
+/// Asserts that `once@1.4.0` was not requested and is Unresolved, while the
+/// registry Package `wrappy@1.0.2` was requested.
+fn assert_once_is_not_from_the_registry(project: &Project, case: &str) {
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    let once = json_package(&json["packages"], "once", "1.4.0");
+    assert_eq!(once["reason"], "unresolved", "{case}");
+    assert_eq!(once["origin"], serde_json::Value::Null, "{case}");
+    let paths = project.registry.paths();
+    assert!(
+        !paths.contains(&"/once/1.4.0".to_string()),
+        "{case}: {paths:?}"
+    );
+    assert!(
+        paths.contains(&"/wrappy/1.0.2".to_string()),
+        "{case}: {paths:?}"
+    );
+}
+
+#[test]
+fn npm_package_not_from_a_registry_is_not_requested_and_stays_unresolved() {
+    for resolved in [GIT_URL, CODELOAD_URL, TARBALL_URL, FILE_URL] {
+        let project = Project::from_fixture("npm-basic")
+            .with_policy(ALLOW_ALL)
+            .remove("node_modules")
+            .edit_lockfile(|packages| {
+                for key in ["node_modules/once", "node_modules/wrappy"] {
+                    packages[key].as_object_mut().unwrap().remove("license");
+                }
+                packages["node_modules/once"]["resolved"] = resolved.into();
+            });
+        assert_once_is_not_from_the_registry(&project, resolved);
+    }
+}
+
+#[test]
+fn npm_package_from_any_registry_or_without_resolved_is_requested() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .remove("node_modules")
+        .edit_lockfile(|packages| {
+            for key in ["node_modules/once", "node_modules/wrappy"] {
+                packages[key].as_object_mut().unwrap().remove("license");
+            }
+            packages["node_modules/once"]["resolved"] =
+                "https://npm.example.com/repository/npm/once/-/once-1.4.0.tgz".into();
+            packages["node_modules/wrappy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("resolved");
+        });
+    project.check().code(1);
+    assert_eq!(project.registry.paths(), ["/once/1.4.0", "/wrappy/1.0.2"]);
+}
+
+#[test]
+fn yarn_package_not_from_a_registry_is_not_requested_and_stays_unresolved() {
+    let v1 = r#"  resolved "https://registry.npmjs.org/once/-/once-1.4.0.tgz#583b1aa775961d4b113ac17d9c50baef9dd76bd1"
+"#;
+    let berry = "  resolution: \"once@npm:1.4.0\"\n";
+    let cases = [
+        ("yarn-v1", v1, format!("  resolved \"{GIT_URL}\"\n")),
+        ("yarn-v1", v1, format!("  resolved \"{CODELOAD_URL}\"\n")),
+        ("yarn-v1", v1, format!("  resolved \"{TARBALL_URL}\"\n")),
+        ("yarn-v1", v1, format!("  resolved \"{FILE_URL}\"\n")),
+        ("yarn-v1", v1, String::new()),
+        (
+            "yarn-berry",
+            berry,
+            "  resolution: \"once@https://github.com/isaacs/once.git#commit=0e614d9\"\n".into(),
+        ),
+        (
+            "yarn-berry",
+            berry,
+            format!("  resolution: \"once@{TARBALL_URL}\"\n"),
+        ),
+        (
+            "yarn-berry",
+            berry,
+            "  resolution: \"once@file:../once-1.4.0.tgz::locator=app%40workspace%3A.\"\n".into(),
+        ),
+    ];
+    for (fixture, from, to) in cases {
+        let project = Project::from_fixture(fixture)
+            .with_policy(ALLOW_ALL)
+            .remove("node_modules")
+            .replace_in("yarn.lock", from, &to);
+        assert_once_is_not_from_the_registry(&project, &format!("{fixture}: {to}"));
+    }
+}
+
+/// The `resolution` of `once@1.4.0` in the pnpm fixtures.
+const PNPM_ONCE_RESOLUTION: &str = "resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}";
+
+#[test]
+fn pnpm_package_not_from_a_registry_is_not_requested_and_stays_unresolved() {
+    for fixture in ["pnpm-v6", "pnpm-v9"] {
+        for resolution in [
+            "{type: git, repo: 'https://github.com/isaacs/once.git', commit: 0e614d9}".to_string(),
+            format!("{{tarball: '{CODELOAD_URL}'}}"),
+            format!("{{integrity: sha512-x, tarball: '{TARBALL_URL}'}}"),
+            format!("{{integrity: sha512-x, tarball: '{FILE_URL}'}}"),
+        ] {
+            let project = Project::from_fixture(fixture)
+                .with_policy(ALLOW_ALL)
+                .remove("node_modules")
+                .replace_in(
+                    "pnpm-lock.yaml",
+                    PNPM_ONCE_RESOLUTION,
+                    &format!("resolution: {resolution}"),
+                );
+            assert_once_is_not_from_the_registry(&project, &format!("{fixture}: {resolution}"));
+        }
+    }
+}
+
+#[test]
+fn pnpm_package_with_a_registry_tarball_is_requested() {
+    for fixture in ["pnpm-v6", "pnpm-v9"] {
+        let project = Project::from_fixture(fixture)
+            .with_policy(ALLOW_ALL)
+            .remove("node_modules")
+            .replace_in(
+                "pnpm-lock.yaml",
+                PNPM_ONCE_RESOLUTION,
+                "resolution: {integrity: sha512-x, tarball: 'https://npm.example.com/once/-/once-1.4.0.tgz'}",
+            );
+        project.check().code(1);
+        assert!(
+            project
+                .registry
+                .paths()
+                .contains(&"/once/1.4.0".to_string()),
+            "{fixture}"
+        );
+    }
+}
+
+#[test]
+fn package_is_from_the_registry_only_if_every_inventory_source_says_so() {
+    let remove_ms_license = |packages: &mut serde_json::Value| {
+        packages["node_modules/ms"]
+            .as_object_mut()
+            .unwrap()
+            .remove("license");
+    };
+    let project = Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .edit_lockfile(remove_ms_license)
+        .edit_lockfile_in("tools/scripts/package-lock.json", |packages| {
+            remove_ms_license(packages);
+            packages["node_modules/ms"]["resolved"] = GIT_URL.into();
+        });
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    assert_eq!(
+        json_package(&json["packages"], "ms", "2.1.3")["reason"],
+        "unresolved"
+    );
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+}

@@ -62,6 +62,8 @@ pub(super) fn parse(text: &str) -> Result<Lockfile> {
             name: name.to_string(),
             version: entry.version,
             dependencies,
+            // e.g. not `once@https://…`, `once@file:…` or a `patch:`.
+            from_registry: entry.resolution.contains("@npm:"),
         });
     }
     workspaces.sort();

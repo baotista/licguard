@@ -123,9 +123,27 @@ struct LockEntry {
 
 #[derive(Deserialize)]
 struct Resolution {
-    /// `directory` for a local directory, e.g. a `file:./local` dependency.
+    /// `directory` for a local directory, e.g. a `file:./local` dependency,
+    /// or `git`.
     #[serde(rename = "type")]
     kind: Option<String>,
+    integrity: Option<String>,
+    tarball: Option<String>,
+    repo: Option<String>,
+    directory: Option<String>,
+}
+
+impl Resolution {
+    /// Whether it comes from an npm registry: it has only an `integrity`, or
+    /// a `tarball` with npm's registry layout.
+    fn is_registry(&self) -> bool {
+        let others = self.kind.is_none() && self.repo.is_none() && self.directory.is_none();
+        others
+            && match &self.tarball {
+                Some(tarball) => super::is_registry_tarball(tarball),
+                None => self.integrity.is_some(),
+            }
+    }
 }
 
 #[derive(Deserialize)]
@@ -265,6 +283,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         };
         let found = LicensedPackage {
             license_origin: declared_license.as_ref().map(|_| LicenseOrigin::Installed),
+            from_registry: resolution.is_some_and(Resolution::is_registry),
             declared_license,
             scope,
             introduction_path,

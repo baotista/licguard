@@ -23,6 +23,9 @@ struct Entry {
     version: String,
     /// Its dependencies of any kind, as `(name, descriptor)` pairs.
     dependencies: Vec<(String, String)>,
+    /// Whether it comes from an npm registry: see
+    /// [`LicensedPackage::from_registry`].
+    from_registry: bool,
     /// The 1-based line of its header; `None` when unknown.
     line: Option<usize>,
 }
@@ -203,6 +206,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         };
         let found = LicensedPackage {
             license_origin: declared_license.as_ref().map(|_| LicenseOrigin::Installed),
+            from_registry: entry.from_registry,
             declared_license,
             scope,
             introduction_path,

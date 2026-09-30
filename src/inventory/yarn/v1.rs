@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 
+use super::super::is_registry_tarball;
 use super::{Entry, Format, Lockfile, descriptor_name};
 
 /// Parses a Yarn v1 lockfile. Each entry starts with an unindented line of
@@ -31,6 +32,7 @@ pub(super) fn parse(text: &str) -> Result<Lockfile> {
                     descriptors,
                     version: String::new(),
                     dependencies: Vec::new(),
+                    from_registry: false,
                     line: Some(number + 1),
                 });
                 section = None;
@@ -43,8 +45,11 @@ pub(super) fn parse(text: &str) -> Result<Lockfile> {
                 section = None;
                 let (field, value) =
                     pair(content).ok_or_else(|| error("expected `field value`"))?;
-                if field == "version" {
-                    entry.version = value.to_string();
+                match field {
+                    "version" => entry.version = value.to_string(),
+                    // An entry without it, e.g. a `file:` one, is not.
+                    "resolved" => entry.from_registry = is_registry_tarball(value),
+                    _ => {}
                 }
             }
             (4, Some(entry)) => {

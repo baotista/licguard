@@ -189,7 +189,8 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy) -> Result<()> {
         .iter_mut()
         .filter(|p| match p.package.ecosystem {
             Ecosystem::Npm => {
-                p.declared_license.is_none()
+                p.from_registry
+                    && p.declared_license.is_none()
                     && clarification::find(&policy.clarifications, &p.package).is_none()
             }
         })
