@@ -1,5 +1,12 @@
+use std::collections::{HashMap, VecDeque};
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -12,6 +19,9 @@ struct Project {
     /// Environment variables set (`Some`) or removed (`None`) for the
     /// commands run on the Project.
     env: Vec<(String, Option<String>)>,
+    /// The npm registry the commands query, unless `LICGUARD_NPM_REGISTRY`
+    /// is set otherwise: by default, it knows no Package.
+    registry: Registry,
 }
 
 /// The date `LICGUARD_TODAY` pins by default, so that no test depends on the
@@ -28,6 +38,7 @@ impl Project {
         Project {
             dir,
             env: Vec::new(),
+            registry: Registry::start(),
         }
     }
 
@@ -53,6 +64,13 @@ impl Project {
         self
     }
 
+    /// Makes the registry answer `responses` to `GET path`, one per
+    /// request, repeating the last one: see [`Registry::respond`].
+    fn with_registry_response(self, path: &str, responses: &[(u16, &str)]) -> Self {
+        self.registry.respond(path, responses);
+        self
+    }
+
     fn replace_in(self, file: &str, from: &str, to: &str) -> Self {
         let path = self.dir.path().join(file);
         let text = fs::read_to_string(&path).unwrap();
@@ -65,6 +83,13 @@ impl Project {
         let path = self.dir.path().join(file);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+        self
+    }
+
+    fn append(self, file: &str, contents: &str) -> Self {
+        let path = self.dir.path().join(file);
+        let text = fs::read_to_string(&path).unwrap();
+        fs::write(path, text + contents).unwrap();
         self
     }
 
@@ -151,7 +176,12 @@ impl Project {
             .arg(command)
             .arg(path)
             .args(args)
-            .env("LICGUARD_TODAY", TODAY);
+            .env("LICGUARD_TODAY", TODAY)
+            .env("LICGUARD_NPM_REGISTRY", &self.registry.url);
+        // The registry is local: a proxy of the machine must not serve it.
+        for proxy in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"] {
+            cmd.env_remove(proxy).env_remove(proxy.to_lowercase());
+        }
         for (key, value) in &self.env {
             match value {
                 Some(value) => cmd.env(key, value),
@@ -165,6 +195,133 @@ impl Project {
 /// Parses the JSON document a command wrote on stdout.
 fn stdout_json(assert: assert_cmd::assert::Assert) -> serde_json::Value {
     serde_json::from_slice(&assert.get_output().stdout).expect("stdout is a JSON document")
+}
+
+/// A minimal HTTP/1.1 npm registry on a local port, so that no test reaches
+/// the real one. It answers each request with its canned responses for the
+/// path, else `404`, one connection per request, and records the requests.
+struct Registry {
+    url: String,
+    state: Arc<RegistryState>,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    /// The responses left by path; the last one is repeated.
+    responses: Mutex<HashMap<String, VecDeque<(u16, String)>>>,
+    requests: Mutex<Vec<RegistryRequest>>,
+    /// How long each request is held before it is answered, in milliseconds.
+    delay_ms: AtomicUsize,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+}
+
+/// A request the registry received.
+#[derive(Debug, Clone)]
+struct RegistryRequest {
+    path: String,
+    /// Names in lower case, in the order received.
+    headers: Vec<(String, String)>,
+}
+
+impl Registry {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let state = Arc::new(RegistryState::default());
+        let server = Arc::clone(&state);
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let state = Arc::clone(&server);
+                thread::spawn(move || state.serve(stream));
+            }
+        });
+        Registry { url, state }
+    }
+
+    /// Answers the requests for `path` with `responses`, `(status, body)`
+    /// pairs, in order, repeating the last one. Status `0` closes the
+    /// connection without an answer.
+    fn respond(&self, path: &str, responses: &[(u16, &str)]) {
+        let responses = responses
+            .iter()
+            .map(|(status, body)| (*status, body.to_string()))
+            .collect();
+        self.state
+            .responses
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), responses);
+    }
+
+    fn delay(&self, delay: Duration) {
+        self.state
+            .delay_ms
+            .store(delay.as_millis() as usize, Ordering::SeqCst);
+    }
+
+    fn requests(&self) -> Vec<RegistryRequest> {
+        self.state.requests.lock().unwrap().clone()
+    }
+
+    /// The paths requested, sorted: concurrent requests come in any order.
+    fn paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = self.requests().into_iter().map(|r| r.path).collect();
+        paths.sort();
+        paths
+    }
+
+    /// The most requests ever handled at the same time.
+    fn max_in_flight(&self) -> usize {
+        self.state.max_in_flight.load(Ordering::SeqCst)
+    }
+}
+
+impl RegistryState {
+    fn serve(&self, stream: TcpStream) {
+        let in_flight = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(in_flight, Ordering::SeqCst);
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let path = line.split(' ').nth(1).unwrap_or_default().to_string();
+        let mut headers = Vec::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let Some((name, value)) = line.trim_end().split_once(':') else {
+                break; // the blank line that ends the head
+            };
+            headers.push((name.to_lowercase(), value.trim().to_string()));
+        }
+        self.requests.lock().unwrap().push(RegistryRequest {
+            path: path.clone(),
+            headers,
+        });
+        let (status, body) = {
+            let mut responses = self.responses.lock().unwrap();
+            match responses.get_mut(&path) {
+                Some(queue) if queue.len() > 1 => queue.pop_front().unwrap(),
+                Some(queue) => queue[0].clone(),
+                None => (404, r#"{"error":"Not found"}"#.to_string()),
+            }
+        };
+        thread::sleep(Duration::from_millis(
+            self.delay_ms.load(Ordering::SeqCst) as u64
+        ));
+        // Before answering, so that the client's next request never counts
+        // this one.
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if status == 0 {
+            return; // closes the connection without an answer
+        }
+        let response = format!(
+            "HTTP/1.1 {status} Canned\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = (&stream).write_all(response.as_bytes());
+    }
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -2294,18 +2451,39 @@ fn yarn_installed_copy_in_a_workspace_member_is_a_license_origin() {
 }
 
 #[test]
-fn yarn_berry_project_in_plug_n_play_mode_is_unresolved_until_the_registry_is_an_origin() {
+fn yarn_berry_project_in_plug_n_play_mode_takes_its_licenses_from_the_registry() {
     Project::from_fixture("yarn-berry")
         .with_policy(DENY_ALL)
         .remove("node_modules")
         .write(".pnp.cjs", "")
+        .with_registry_response("/ms/2.1.3", &[(200, r#"{"license":"MIT"}"#)])
         .check()
         .code(1)
         .stdout(predicate::str::contains("6 packages (npm)"))
         .stdout(predicate::str::contains(
-            "DENY    (unresolved)    ms@2.1.3  via app > ms",
+            "DENY    MIT             ms@2.1.3  via app > ms",
+        ))
+        .stdout(predicate::str::contains(
+            "DENY    (unresolved)    once@1.4.0",
         ))
         .stdout(predicate::str::contains("6 deny · 0 review · 0 allow"));
+}
+
+#[test]
+fn pnpm_package_not_in_the_virtual_store_takes_its_license_from_the_registry() {
+    for fixture in ["pnpm-v6", "pnpm-v9"] {
+        let json = stdout_json(
+            Project::from_fixture(fixture)
+                .with_policy(DENY_ALL)
+                .remove("node_modules")
+                .with_registry_response("/@types%2Fms/0.7.34", &[(200, r#"{"license":"MIT"}"#)])
+                .list_with(&["--format", "json", "--include-dev"])
+                .success(),
+        );
+        let types = json_package(&json["packages"], "@types/ms", "0.7.34");
+        assert_eq!(types["declared_license"], "MIT", "{fixture}");
+        assert_eq!(types["origin"], "registry", "{fixture}");
+    }
 }
 
 #[test]
@@ -4402,4 +4580,588 @@ fn waive_expiry_can_be_today() {
         .waive_with(&[&WAIVE_ALL[..4], &[TODAY]].concat())
         .success();
     project.check().success();
+}
+
+/// npm-basic with no installed copy, and no license in the lockfile for
+/// `ms@2.1.3` and `@types/ms@0.7.34`: only the registry can declare theirs.
+fn project_licensed_by_the_registry() -> Project {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .remove("node_modules")
+        .edit_lockfile(|packages| {
+            for key in ["node_modules/ms", "node_modules/@types/ms"] {
+                packages[key].as_object_mut().unwrap().remove("license");
+            }
+        })
+}
+
+#[test]
+fn package_with_no_local_license_gets_its_declared_license_from_the_registry() {
+    let json = stdout_json(
+        project_licensed_by_the_registry()
+            .with_registry_response("/ms/2.1.3", &[(200, r#"{"name":"ms","license":"MIT"}"#)])
+            .with_registry_response(
+                "/@types%2Fms/0.7.34",
+                &[(200, r#"{"name":"@types/ms","license":"ISC"}"#)],
+            )
+            .list_with(&["--format", "json"])
+            .success(),
+    );
+    let ms = json_package(&json["packages"], "ms", "2.1.3");
+    assert_eq!(ms["declared_license"], "MIT");
+    assert_eq!(ms["license"], "MIT");
+    assert_eq!(ms["origin"], "registry");
+    let types = json_package(&json["packages"], "@types/ms", "0.7.34");
+    assert_eq!(types["declared_license"], "ISC");
+    assert_eq!(types["verdict"], "deny");
+    assert_eq!(types["origin"], "registry");
+}
+
+#[test]
+fn package_the_registry_does_not_know_is_unresolved() {
+    let project = project_licensed_by_the_registry()
+        .with_registry_response("/ms/2.1.3", &[(200, r#"{"name":"ms"}"#)]);
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    // `@types/ms@0.7.34` gets a 404.
+    for (name, version) in [("ms", "2.1.3"), ("@types/ms", "0.7.34")] {
+        let package = json_package(&json["packages"], name, version);
+        assert_eq!(package["declared_license"], serde_json::Value::Null);
+        assert_eq!(package["reason"], "unresolved");
+        assert_eq!(package["origin"], serde_json::Value::Null);
+    }
+    assert_eq!(
+        project.registry.paths(),
+        ["/@types%2Fms/0.7.34", "/ms/2.1.3"]
+    );
+}
+
+#[test]
+fn registry_legacy_licenses_array_offers_a_choice() {
+    let json = stdout_json(
+        project_licensed_by_the_registry()
+            .with_registry_response(
+                "/ms/2.1.3",
+                &[(
+                    200,
+                    r#"{"licenses":[{"type":"ISC","url":"https://example.com"},{"type":"MIT"}]}"#,
+                )],
+            )
+            .list_with(&["--format", "json"])
+            .success(),
+    );
+    let ms = json_package(&json["packages"], "ms", "2.1.3");
+    assert_eq!(ms["declared_license"], "ISC OR MIT");
+    assert_eq!(ms["elected"], "MIT");
+    assert_eq!(ms["verdict"], "allow");
+    assert_eq!(ms["origin"], "registry");
+}
+
+#[test]
+fn clarified_package_is_not_requested_from_the_registry() {
+    let project = project_licensed_by_the_registry()
+        .with_policy(&format!("{DENY_ISC}{}", clarification("ms", None, "MIT")));
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    assert_eq!(
+        json_package(&json["packages"], "ms", "2.1.3")["origin"],
+        "clarification"
+    );
+    assert_eq!(project.registry.paths(), ["/@types%2Fms/0.7.34"]);
+}
+
+#[test]
+fn each_distinct_package_is_requested_once_dev_ones_included() {
+    let remove_license = |key: &'static str| {
+        move |packages: &mut serde_json::Value| {
+            packages[key].as_object_mut().unwrap().remove("license");
+        }
+    };
+    let project = Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .edit_lockfile(remove_license("node_modules/ms"))
+        .edit_lockfile(remove_license("node_modules/@types/ms"))
+        .edit_lockfile_in(
+            "tools/scripts/package-lock.json",
+            remove_license("node_modules/ms"),
+        );
+    project.check().code(1);
+    assert_eq!(
+        project.registry.paths(),
+        ["/@types%2Fms/0.7.34", "/ms/2.1.3"]
+    );
+}
+
+#[test]
+fn registry_requests_send_only_the_package_and_the_allowed_headers() {
+    let project = project_licensed_by_the_registry();
+    project.check().code(1);
+    let requests = project.registry.requests();
+    assert_eq!(requests.len(), 2);
+    let user_agent = format!("licguard/{}", env!("CARGO_PKG_VERSION"));
+    for request in requests {
+        let mut headers = request.headers.clone();
+        headers.sort();
+        assert_eq!(
+            headers,
+            [
+                ("accept".to_string(), "application/json".to_string()),
+                (
+                    "host".to_string(),
+                    project.registry.url["http://".len()..].to_string()
+                ),
+                ("user-agent".to_string(), user_agent.clone()),
+            ],
+            "{}",
+            request.path
+        );
+    }
+}
+
+#[test]
+fn registry_request_is_retried_until_it_succeeds_on_the_third_attempt() {
+    let project = project_licensed_by_the_registry().with_registry_response(
+        "/ms/2.1.3",
+        &[(503, ""), (429, ""), (200, r#"{"license":"MIT"}"#)],
+    );
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    assert_eq!(
+        json_package(&json["packages"], "ms", "2.1.3")["license"],
+        "MIT"
+    );
+    let attempts = project
+        .registry
+        .paths()
+        .iter()
+        .filter(|p| *p == "/ms/2.1.3")
+        .count();
+    assert_eq!(attempts, 3);
+}
+
+const OFFLINE_HINT: &str =
+    "hint: check your network or proxy, or run with --offline to use only local License origins";
+
+#[test]
+fn registry_failing_after_the_retries_is_a_runtime_error() {
+    let project =
+        project_licensed_by_the_registry().with_registry_response("/ms/2.1.3", &[(503, "")]);
+    project
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(format!(
+            "cannot fetch the license of ms@2.1.3 from the npm registry {}: status 503",
+            project.registry.url
+        )))
+        .stderr(predicate::str::contains(OFFLINE_HINT));
+    let attempts = project
+        .registry
+        .paths()
+        .iter()
+        .filter(|p| *p == "/ms/2.1.3")
+        .count();
+    assert_eq!(attempts, 3);
+}
+
+/// The URL of a local port that nothing listens on.
+fn closed_port_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    format!("http://{}", listener.local_addr().unwrap())
+}
+
+#[test]
+fn unreachable_registry_is_a_runtime_error() {
+    let url = closed_port_url();
+    project_licensed_by_the_registry()
+        .with_env("LICGUARD_NPM_REGISTRY", &url)
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(format!(
+            "cannot fetch the license of @types/ms@0.7.34 from the npm registry {url}: "
+        )))
+        .stderr(predicate::str::contains(OFFLINE_HINT));
+}
+
+#[test]
+fn registry_request_is_retried_after_a_connection_error() {
+    let project = project_licensed_by_the_registry()
+        .with_registry_response("/ms/2.1.3", &[(0, ""), (200, r#"{"license":"MIT"}"#)]);
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    assert_eq!(
+        json_package(&json["packages"], "ms", "2.1.3")["license"],
+        "MIT"
+    );
+}
+
+#[test]
+fn registry_answering_another_status_is_a_runtime_error_without_retry() {
+    let project =
+        project_licensed_by_the_registry().with_registry_response("/ms/2.1.3", &[(403, "")]);
+    project
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(format!(
+            "the npm registry {} answered status 403 for ms@2.1.3",
+            project.registry.url
+        )))
+        .stderr(predicate::str::contains("hint: "));
+    let attempts = project
+        .registry
+        .paths()
+        .iter()
+        .filter(|p| *p == "/ms/2.1.3")
+        .count();
+    assert_eq!(attempts, 1);
+}
+
+#[test]
+fn registry_answering_an_invalid_document_is_a_runtime_error() {
+    let project = project_licensed_by_the_registry()
+        .with_registry_response("/ms/2.1.3", &[(200, "<html>proxy login</html>")]);
+    project
+        .check()
+        .code(2)
+        .stderr(predicate::str::contains(format!(
+            "the npm registry {} answered an invalid document for ms@2.1.3",
+            project.registry.url
+        )))
+        .stderr(predicate::str::contains("hint: "));
+}
+
+#[test]
+fn offline_makes_no_request_and_leaves_packages_unresolved() {
+    let project = project_licensed_by_the_registry()
+        .with_registry_response("/ms/2.1.3", &[(200, r#"{"license":"MIT"}"#)]);
+    project
+        .check_with(&["--offline"])
+        .code(1)
+        .stdout(predicate::str::contains("DENY    (unresolved)    ms@2.1.3"));
+    let json = stdout_json(
+        project
+            .list_with(&["--offline", "--format", "json"])
+            .success(),
+    );
+    let ms = json_package(&json["packages"], "ms", "2.1.3");
+    assert_eq!(ms["reason"], "unresolved");
+    project
+        .waive_with(&[&WAIVE_ALL[..], &["--offline"]].concat())
+        .code(1)
+        .stderr(predicate::str::contains(
+            "cannot waive ms@2.1.3: its license is Unresolved",
+        ));
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+}
+
+#[test]
+fn registry_requests_are_concurrent_up_to_16_in_flight() {
+    let project = project_licensed_by_the_registry().edit_lockfile(|packages| {
+        for i in 0..40 {
+            packages[format!("node_modules/pkg-{i:02}")] =
+                serde_json::json!({ "version": "1.0.0" });
+        }
+    });
+    project.registry.delay(Duration::from_millis(50));
+    project.check().code(1);
+    assert_eq!(project.registry.requests().len(), 42);
+    let max = project.registry.max_in_flight();
+    assert!((2..=16).contains(&max), "{max} requests in flight");
+}
+
+#[test]
+fn registry_url_may_end_with_a_slash() {
+    let project = project_licensed_by_the_registry()
+        .with_registry_response("/ms/2.1.3", &[(200, r#"{"license":"MIT"}"#)]);
+    let url = format!("{}/", project.registry.url);
+    let json = stdout_json(
+        project
+            .with_env("LICGUARD_NPM_REGISTRY", &url)
+            .list_with(&["--format", "json"])
+            .success(),
+    );
+    assert_eq!(
+        json_package(&json["packages"], "ms", "2.1.3")["license"],
+        "MIT"
+    );
+}
+
+#[test]
+fn help_documents_the_registry_override_and_offline() {
+    for command in ["check", "list", "waive"] {
+        Command::cargo_bin("licguard")
+            .unwrap()
+            .args([command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--offline"))
+            .stdout(predicate::str::contains("LICGUARD_NPM_REGISTRY=URL"));
+    }
+}
+
+#[test]
+fn registry_override_that_is_not_an_http_url_is_a_runtime_error() {
+    for url in ["", "registry.example.com", "ftp://registry.example.com"] {
+        let project = Project::from_fixture("npm-basic")
+            .with_policy(ALLOW_ALL)
+            .with_env("LICGUARD_NPM_REGISTRY", url);
+        project
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "LICGUARD_NPM_REGISTRY `{url}` is not an http:// or https:// URL"
+            )))
+            .stderr(predicate::str::contains("hint: "));
+        project.check_with(&["--offline"]).success();
+    }
+}
+
+/// Where a dependency that is not from an npm registry comes from: a git
+/// repository, a tarball URL outside the registry layout, a local file.
+const GIT_URL: &str =
+    "git+ssh://git@github.com/isaacs/once.git#0e614d9f5a7e6f0305c625f6b581f6d80b33b8a6";
+const CODELOAD_URL: &str =
+    "https://codeload.github.com/isaacs/once/tar.gz/0e614d9f5a7e6f0305c625f6b581f6d80b33b8a6";
+const TARBALL_URL: &str = "https://example.com/once-1.4.0.tgz";
+const FILE_URL: &str = "file:../once-1.4.0.tgz";
+
+/// Asserts that `once@1.4.0` was not requested and is Unresolved, while the
+/// registry Package `wrappy@1.0.2` was requested.
+fn assert_once_is_not_from_the_registry(project: &Project, case: &str) {
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    let once = json_package(&json["packages"], "once", "1.4.0");
+    assert_eq!(once["reason"], "unresolved", "{case}");
+    assert_eq!(once["origin"], serde_json::Value::Null, "{case}");
+    let paths = project.registry.paths();
+    assert!(
+        !paths.contains(&"/once/1.4.0".to_string()),
+        "{case}: {paths:?}"
+    );
+    assert!(
+        paths.contains(&"/wrappy/1.0.2".to_string()),
+        "{case}: {paths:?}"
+    );
+}
+
+#[test]
+fn npm_package_not_from_a_registry_is_not_requested_and_stays_unresolved() {
+    for resolved in [GIT_URL, CODELOAD_URL, TARBALL_URL, FILE_URL] {
+        let project = Project::from_fixture("npm-basic")
+            .with_policy(ALLOW_ALL)
+            .remove("node_modules")
+            .edit_lockfile(|packages| {
+                for key in ["node_modules/once", "node_modules/wrappy"] {
+                    packages[key].as_object_mut().unwrap().remove("license");
+                }
+                packages["node_modules/once"]["resolved"] = resolved.into();
+            });
+        assert_once_is_not_from_the_registry(&project, resolved);
+    }
+}
+
+#[test]
+fn npm_package_from_any_registry_or_without_resolved_is_requested() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .remove("node_modules")
+        .edit_lockfile(|packages| {
+            for key in ["node_modules/once", "node_modules/wrappy"] {
+                packages[key].as_object_mut().unwrap().remove("license");
+            }
+            packages["node_modules/once"]["resolved"] =
+                "https://npm.example.com/repository/npm/once/-/once-1.4.0.tgz".into();
+            packages["node_modules/wrappy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("resolved");
+        });
+    project.check().code(1);
+    assert_eq!(project.registry.paths(), ["/once/1.4.0", "/wrappy/1.0.2"]);
+}
+
+#[test]
+fn yarn_package_not_from_a_registry_is_not_requested_and_stays_unresolved() {
+    // No line ends: the fixtures may be checked out with CRLF.
+    let v1 = r#"  resolved "https://registry.npmjs.org/once/-/once-1.4.0.tgz#583b1aa775961d4b113ac17d9c50baef9dd76bd1""#;
+    let berry = "  resolution: \"once@npm:1.4.0\"";
+    let cases = [
+        ("yarn-v1", v1, format!("  resolved \"{GIT_URL}\"")),
+        ("yarn-v1", v1, format!("  resolved \"{CODELOAD_URL}\"")),
+        ("yarn-v1", v1, format!("  resolved \"{TARBALL_URL}\"")),
+        ("yarn-v1", v1, format!("  resolved \"{FILE_URL}\"")),
+        ("yarn-v1", v1, String::new()),
+        (
+            "yarn-berry",
+            berry,
+            "  resolution: \"once@https://github.com/isaacs/once.git#commit=0e614d9\"".into(),
+        ),
+        (
+            "yarn-berry",
+            berry,
+            format!("  resolution: \"once@{TARBALL_URL}\""),
+        ),
+        (
+            "yarn-berry",
+            berry,
+            "  resolution: \"once@file:../once-1.4.0.tgz::locator=app%40workspace%3A.\"".into(),
+        ),
+    ];
+    for (fixture, from, to) in cases {
+        let project = Project::from_fixture(fixture)
+            .with_policy(ALLOW_ALL)
+            .remove("node_modules")
+            .replace_in("yarn.lock", from, &to);
+        assert_once_is_not_from_the_registry(&project, &format!("{fixture}: {to}"));
+    }
+}
+
+/// The `resolution` of `once@1.4.0` in the pnpm fixtures.
+const PNPM_ONCE_RESOLUTION: &str = "resolution: {integrity: sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w==}";
+
+#[test]
+fn pnpm_package_not_from_a_registry_is_not_requested_and_stays_unresolved() {
+    for fixture in ["pnpm-v6", "pnpm-v9"] {
+        for resolution in [
+            "{type: git, repo: 'https://github.com/isaacs/once.git', commit: 0e614d9}".to_string(),
+            format!("{{tarball: '{CODELOAD_URL}'}}"),
+            format!("{{integrity: sha512-x, tarball: '{TARBALL_URL}'}}"),
+            format!("{{integrity: sha512-x, tarball: '{FILE_URL}'}}"),
+        ] {
+            let project = Project::from_fixture(fixture)
+                .with_policy(ALLOW_ALL)
+                .remove("node_modules")
+                .replace_in(
+                    "pnpm-lock.yaml",
+                    PNPM_ONCE_RESOLUTION,
+                    &format!("resolution: {resolution}"),
+                );
+            assert_once_is_not_from_the_registry(&project, &format!("{fixture}: {resolution}"));
+        }
+    }
+}
+
+#[test]
+fn pnpm_package_with_a_registry_tarball_is_requested() {
+    for fixture in ["pnpm-v6", "pnpm-v9"] {
+        let project = Project::from_fixture(fixture)
+            .with_policy(ALLOW_ALL)
+            .remove("node_modules")
+            .replace_in(
+                "pnpm-lock.yaml",
+                PNPM_ONCE_RESOLUTION,
+                "resolution: {integrity: sha512-x, tarball: 'https://npm.example.com/once/-/once-1.4.0.tgz'}",
+            );
+        project.check().code(1);
+        assert!(
+            project
+                .registry
+                .paths()
+                .contains(&"/once/1.4.0".to_string()),
+            "{fixture}"
+        );
+    }
+}
+
+#[test]
+fn package_is_from_the_registry_only_if_every_inventory_source_says_so() {
+    let remove_ms_license = |packages: &mut serde_json::Value| {
+        packages["node_modules/ms"]
+            .as_object_mut()
+            .unwrap()
+            .remove("license");
+    };
+    let project = Project::from_fixture("npm-workspaces")
+        .with_policy(DENY_ALL)
+        .edit_lockfile(remove_ms_license)
+        .edit_lockfile_in("tools/scripts/package-lock.json", |packages| {
+            remove_ms_license(packages);
+            packages["node_modules/ms"]["resolved"] = GIT_URL.into();
+        });
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    assert_eq!(
+        json_package(&json["packages"], "ms", "2.1.3")["reason"],
+        "unresolved"
+    );
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+}
+
+/// Adds the aliased dependency `string-width-cjs`, i.e.
+/// `npm:string-width@^4.2.0`, resolved to `string-width@4.2.3`, to the
+/// root of the fixture Project.
+fn with_aliased_string_width(fixture: &str) -> Project {
+    let project = Project::from_fixture(fixture)
+        .with_policy(ALLOW_ALL)
+        .remove("node_modules");
+    let dependency = r#""string-width-cjs": "npm:string-width@^4.2.0""#;
+    match fixture {
+        "npm-basic" => project.edit_lockfile(|packages| {
+            packages[""]["dependencies"]["string-width-cjs"] = "npm:string-width@^4.2.0".into();
+            packages["node_modules/string-width-cjs"] = serde_json::json!({
+                "name": "string-width",
+                "version": "4.2.3",
+                "resolved": "https://registry.npmjs.org/string-width/-/string-width-4.2.3.tgz",
+            });
+        }),
+        "yarn-v1" => project
+            .replace_in(
+                "package.json",
+                r#""once":"^1.4.0""#,
+                &format!(r#""once":"^1.4.0",{dependency}"#),
+            )
+            .append(
+                "yarn.lock",
+                "\n\"string-width-cjs@npm:string-width@^4.2.0\":\n  version \"4.2.3\"\n  resolved \"https://registry.yarnpkg.com/string-width/-/string-width-4.2.3.tgz#269c7117d27b05ad2e536830a8ec895ef9c6d010\"\n  integrity sha512-x\n",
+            ),
+        "yarn-berry" => project
+            .replace_in(
+                "package.json",
+                r#""once": "^1.4.0""#,
+                &format!(r#""once": "^1.4.0", {dependency}"#),
+            )
+            .append(
+                "yarn.lock",
+                "\n\"string-width-cjs@npm:string-width@^4.2.0\":\n  version: 4.2.3\n  resolution: \"string-width@npm:4.2.3\"\n  checksum: 10c0/x\n  languageName: node\n  linkType: hard\n",
+            ),
+        _ => unreachable!("{fixture}"),
+    }
+}
+
+const ALIAS_FIXTURES: [&str; 3] = ["npm-basic", "yarn-v1", "yarn-berry"];
+
+#[test]
+fn aliased_dependency_is_the_real_package_and_is_requested_under_its_name() {
+    for fixture in ALIAS_FIXTURES {
+        let project = with_aliased_string_width(fixture)
+            .with_registry_response("/string-width/4.2.3", &[(200, r#"{"license":"MIT"}"#)]);
+        let json = stdout_json(project.list_with(&["--format", "json"]).success());
+        let packages = json["packages"].as_array().unwrap();
+        assert!(
+            !packages.iter().any(|p| p["name"] == "string-width-cjs"),
+            "{fixture}"
+        );
+        let string_width = json_package(&json["packages"], "string-width", "4.2.3");
+        assert_eq!(string_width["origin"], "registry", "{fixture}");
+        assert_eq!(
+            string_width["introduction_path"],
+            serde_json::json!(["app", "string-width-cjs"]),
+            "{fixture}"
+        );
+        let paths = project.registry.paths();
+        assert!(
+            paths.contains(&"/string-width/4.2.3".to_string()),
+            "{fixture}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.contains("cjs")),
+            "{fixture}: {paths:?}"
+        );
+    }
+}
+
+#[test]
+fn aliased_dependency_takes_its_license_from_its_installed_copy() {
+    for fixture in ALIAS_FIXTURES {
+        let project = with_aliased_string_width(fixture).write(
+            "node_modules/string-width-cjs/package.json",
+            r#"{ "name": "string-width", "version": "4.2.3", "license": "MIT" }"#,
+        );
+        let json = stdout_json(project.list_with(&["--format", "json"]).success());
+        let string_width = json_package(&json["packages"], "string-width", "4.2.3");
+        assert_eq!(string_width["origin"], "installed", "{fixture}");
+    }
 }

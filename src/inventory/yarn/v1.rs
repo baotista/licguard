@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 
-use super::{Entry, Format, Lockfile, descriptor_name};
+use super::super::is_registry_tarball;
+use super::{Entry, Format, Lockfile, aliased_name, descriptor_name};
 
 /// Parses a Yarn v1 lockfile. Each entry starts with an unindented line of
 /// comma-separated descriptors ending with `:`, e.g. `wrappy@1, wrappy@^1.0.2:`,
@@ -26,11 +27,15 @@ pub(super) fn parse(text: &str) -> Result<Lockfile> {
                     .split(", ")
                     .map(|descriptor| unquote(descriptor.trim()).to_string())
                     .collect();
+                let first = &descriptors[0];
                 entries.push(Entry {
-                    name: descriptor_name(&descriptors[0]).to_string(),
+                    name: aliased_name(first)
+                        .unwrap_or_else(|| descriptor_name(first))
+                        .to_string(),
                     descriptors,
                     version: String::new(),
                     dependencies: Vec::new(),
+                    from_registry: false,
                     line: Some(number + 1),
                 });
                 section = None;
@@ -43,8 +48,11 @@ pub(super) fn parse(text: &str) -> Result<Lockfile> {
                 section = None;
                 let (field, value) =
                     pair(content).ok_or_else(|| error("expected `field value`"))?;
-                if field == "version" {
-                    entry.version = value.to_string();
+                match field {
+                    "version" => entry.version = value.to_string(),
+                    // An entry without it, e.g. a `file:` one, is not.
+                    "resolved" => entry.from_registry = is_registry_tarball(value),
+                    _ => {}
                 }
             }
             (4, Some(entry)) => {

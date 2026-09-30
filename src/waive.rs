@@ -13,8 +13,9 @@ use crate::evaluation::{self, Evaluated};
 use crate::policy::CONFIG;
 
 /// Writes a Waiver for each Violation of the Project at `root`, as `check`
-/// with the same `strict` and `include_dev` would report them, and prints what
-/// it did. Fails (exit 1) when an Unresolved Violation could not be waived.
+/// with the same `strict`, `include_dev` and `offline` would report them, and
+/// prints what it did. Fails (exit 1) when an Unresolved Violation could not
+/// be waived.
 pub fn waive(
     root: &Path,
     all_violations: bool,
@@ -22,6 +23,7 @@ pub fn waive(
     expires: Option<&str>,
     strict: bool,
     include_dev: bool,
+    offline: bool,
 ) -> Result<ExitCode> {
     if !all_violations {
         bail!(
@@ -51,7 +53,7 @@ pub fn waive(
         bail!("`--expires` `{expires}` is before today ({today})\n{EXPIRES_HINT}");
     }
     let expires = &expires.to_string();
-    let evaluation = evaluation::evaluate(root, include_dev)?;
+    let evaluation = evaluation::evaluate(root, include_dev, offline)?;
     // Sorted by Package, like the Evaluation, so new entries are too.
     let violations: Vec<_> = evaluation
         .evaluated

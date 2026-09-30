@@ -25,6 +25,9 @@ struct Lockfile {
 struct LockEntry {
     name: Option<String>,
     version: Option<String>,
+    /// Where npm fetched it from; `None` in some lockfiles, e.g. written with
+    /// `--package-lock-only`.
+    resolved: Option<String>,
     license: Option<serde_json::Value>,
     licenses: Option<serde_json::Value>,
     #[serde(default)]
@@ -105,7 +108,9 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         };
         let package = Package {
             ecosystem: Ecosystem::Npm,
-            name: name.to_string(),
+            // An aliased entry, e.g. `node_modules/string-width-cjs`, names
+            // the real Package, e.g. `string-width`.
+            name: entry.name.as_deref().unwrap_or(name).to_string(),
             version: version.clone(),
         };
         let (declared_license, license_origin) = installed_license(&root.join(key), version)
@@ -118,6 +123,10 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         let found = LicensedPackage {
             declared_license,
             license_origin,
+            from_registry: entry
+                .resolved
+                .as_deref()
+                .is_none_or(super::is_registry_tarball),
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
             introduction_path: introduction_paths.get(key).map(|(path, _)| path.clone()),
             sources: vec![source.to_string()],
@@ -241,7 +250,7 @@ pub(super) fn installed_license(dir: &Path, version: &str) -> Option<String> {
 
 /// The Declared license of a manifest or lockfile entry: its `license`
 /// field, else the legacy `licenses` field.
-fn declared_license(
+pub(crate) fn declared_license(
     license: Option<&serde_json::Value>,
     licenses: Option<&serde_json::Value>,
 ) -> Option<String> {
