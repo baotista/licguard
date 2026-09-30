@@ -171,6 +171,10 @@ impl Project {
             .args(args)
             .env("LICGUARD_TODAY", TODAY)
             .env("LICGUARD_NPM_REGISTRY", &self.registry.url);
+        // The registry is local: a proxy of the machine must not serve it.
+        for proxy in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"] {
+            cmd.env_remove(proxy).env_remove(proxy.to_lowercase());
+        }
         for (key, value) in &self.env {
             match value {
                 Some(value) => cmd.env(key, value),
