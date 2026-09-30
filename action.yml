@@ -135,12 +135,13 @@ runs:
             ;;
         esac
 
-        # ARGS is split on whitespace, without glob expansion.
-        set -f
+        # ARGS is split on whitespace, without glob expansion. GitHub runs
+        # bash with -e, which would exit on licguard's failure.
+        set -f +e
         # shellcheck disable=SC2086
         licguard check --format github $ARGS "$PROJECT"
         code=$?
-        set +f
+        set +f -e
 
         if [ "$OBSERVE" = true ]; then
           echo "::notice title=licguard::Observation mode: the license gate does not fail this step (licguard exited with code $code). Set \`observe: false\` to enforce the Policy."
