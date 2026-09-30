@@ -5487,6 +5487,16 @@ fn help_documents_the_cache() {
 }
 
 #[test]
+fn answers_fetched_before_a_registry_failure_are_cached() {
+    // Retried with backoff before it fails for good: `ms` is answered first.
+    let project = project_with_ms_on_the_registry()
+        .with_registry_response("/@types%2Fms/0.7.34", &[(503, "")]);
+    project.check().code(2);
+    assert_eq!(listed_ms(&project, &["--offline"])["license"], "MIT");
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+}
+
+#[test]
 fn registry_404_is_not_cached() {
     // `@types/ms@0.7.34` gets a 404: a mirror may sync it later.
     let project = project_with_ms_on_the_registry();

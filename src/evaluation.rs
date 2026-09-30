@@ -236,16 +236,25 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -
         }
     }
     let packages: Vec<&Package> = to_fetch.iter().map(|p| &p.package).collect();
-    let answers = registry::answers(&registry, &packages)?;
+    let answers = registry::answers(&registry, &packages);
+    // The first failure in Package order.
+    let mut failure = None;
     for (p, answer) in to_fetch.into_iter().zip(answers) {
-        // A `404` is not cached: the registry may know the version later.
-        if let Answer::Found(license) = answer {
-            cache.insert(&p.package, license.clone());
-            take_license(p, license);
+        match answer {
+            Some(Ok(Answer::Found(license))) => {
+                cache.insert(&p.package, license.clone());
+                take_license(p, license);
+            }
+            // A `404` is not cached: the registry may know the version later.
+            Some(Ok(Answer::NotFound)) | None => {}
+            Some(Err(err)) => {
+                failure.get_or_insert(err);
+            }
         }
     }
+    // Even after a failure, so that the next run need not fetch them again.
     cache.save();
-    Ok(())
+    failure.map_or(Ok(()), Err)
 }
 
 /// Gives `package` the Declared license the registry declares for it, if

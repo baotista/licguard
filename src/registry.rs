@@ -53,10 +53,11 @@ pub enum Answer {
 }
 
 /// Fetches the answer of the npm `registry`, as [`url`] returns it, for
-/// each of `packages`, in order.
-pub fn answers(registry: &str, packages: &[&Package]) -> Result<Vec<Answer>> {
+/// each of `packages`, in order: `None` for those left unrequested once a
+/// request failed for good.
+pub fn answers(registry: &str, packages: &[&Package]) -> Vec<Option<Result<Answer>>> {
     if packages.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let agent: Agent = Agent::config_builder()
         .http_status_as_error(false)
@@ -89,13 +90,7 @@ pub fn answers(registry: &str, packages: &[&Package]) -> Result<Vec<Answer>> {
             });
         }
     });
-    // The first error in Package order, and all the results otherwise.
-    results
-        .into_inner()
-        .unwrap()
-        .into_iter()
-        .flatten()
-        .collect()
+    results.into_inner().unwrap()
 }
 
 /// The registry to query: `LICGUARD_NPM_REGISTRY` when set, else the
