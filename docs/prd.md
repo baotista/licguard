@@ -265,7 +265,7 @@ GitHub is the first-class CI platform.
 
 | Phase | CI behavior |
 | --- | --- |
-| 1. Observation | Non-blocking job (`continue-on-error: true`); the report lists the Violations to fix or waive |
+| 1. Observation | Non-blocking step (the action's `observe: true`); the report lists the Violations to fix or waive |
 | 2. Gate | Blocking on the main branch and pull requests; `review` is non-blocking unless `--strict` |
 
 Moving from phase 1 to phase 2 means fixing each Violation or covering it with a Waiver (`licguard waive`).
@@ -276,13 +276,14 @@ license-check:
   runs-on: ubuntu-latest
   steps:
     - uses: actions/checkout@v4
-    - uses: baotista/licguard@v0        # installs licguard and restores its cache
-    - run: licguard check --format github
+    - uses: baotista/licguard@v0        # installs licguard, restores its cache and runs
+      with:                             # `licguard check --format github`
+        observe: true                   # phase 1; remove it for phase 2
 ```
 
 `--format github` emits annotations (visible on the lockfile in the pull request diff) and a Markdown job summary. SARIF upload to Code Scanning (P1) needs a public repository or GitHub Advanced Security.
 
-**Distribution**: GitHub Releases (via `cargo-dist`), crates.io, Homebrew, a public container image (`ghcr.io/baotista/licguard`), and a GitHub Marketplace action published from this repository (`baotista/licguard`).
+**Distribution**: GitHub Releases (via `cargo-dist`, with shell and PowerShell installers), crates.io, Homebrew (`baotista/homebrew-tap`), a public container image (`ghcr.io/baotista/licguard`), and a GitHub Marketplace action published from this repository (`baotista/licguard`).
 
 ## Roadmap
 
