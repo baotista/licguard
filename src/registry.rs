@@ -54,10 +54,11 @@ pub enum Answer {
 
 /// Fetches the answer of the npm `registry`, as [`url`] returns it, for
 /// each of `packages`, in order: `None` for those left unrequested once a
-/// request failed for good.
-pub fn answers(registry: &str, packages: &[&Package]) -> Vec<Option<Result<Answer>>> {
+/// request failed for good. Also returns how many requests were sent,
+/// retries included.
+pub fn answers(registry: &str, packages: &[&Package]) -> (Vec<Option<Result<Answer>>>, usize) {
     if packages.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
     let agent: Agent = Agent::config_builder()
         .http_status_as_error(false)
@@ -71,6 +72,7 @@ pub fn answers(registry: &str, packages: &[&Package]) -> Vec<Option<Result<Answe
     // new ones once a request has failed for good.
     let next = AtomicUsize::new(0);
     let failed = AtomicBool::new(false);
+    let sent = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<Result<Answer>>>> =
         Mutex::new(packages.iter().map(|_| None).collect());
     thread::scope(|scope| {
@@ -81,7 +83,7 @@ pub fn answers(registry: &str, packages: &[&Package]) -> Vec<Option<Result<Answe
                     let Some(package) = packages.get(index) else {
                         break;
                     };
-                    let result = fetch(&agent, registry, package);
+                    let result = fetch(&agent, registry, package, &sent);
                     if result.is_err() {
                         failed.store(true, Ordering::Relaxed);
                     }
@@ -90,7 +92,7 @@ pub fn answers(registry: &str, packages: &[&Package]) -> Vec<Option<Result<Answe
             });
         }
     });
-    results.into_inner().unwrap()
+    (results.into_inner().unwrap(), sent.into_inner())
 }
 
 /// The registry to query: `LICGUARD_NPM_REGISTRY` when set, else the
@@ -109,8 +111,9 @@ pub fn url() -> Result<String> {
 }
 
 /// Fetches the Declared license of `package`, retrying connection errors,
-/// timeouts, `429` and `5xx` answers with backoff.
-fn fetch(agent: &Agent, registry: &str, package: &Package) -> Result<Answer> {
+/// timeouts, `429` and `5xx` answers with backoff, and counting each
+/// request in `sent`.
+fn fetch(agent: &Agent, registry: &str, package: &Package, sent: &AtomicUsize) -> Result<Answer> {
     let url = format!(
         "{registry}/{}/{}",
         encode(&package.name),
@@ -119,6 +122,7 @@ fn fetch(agent: &Agent, registry: &str, package: &Package) -> Result<Answer> {
     let what = format!("{}@{}", package.name, package.version);
     let mut retries = BACKOFF.iter();
     loop {
+        sent.fetch_add(1, Ordering::Relaxed);
         let failure = match agent.get(&url).call() {
             Ok(mut response) => match response.status().as_u16() {
                 200 => match response.body_mut().read_to_string() {

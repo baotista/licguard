@@ -5572,3 +5572,188 @@ fn nf_02_benchmark_on_1500_registry_packages_cold_and_warm() {
     assert!(cold < Duration::from_secs(120), "cold {cold:?}");
     assert!(warm < Duration::from_secs(30), "warm {warm:?}");
 }
+
+/// Asserts that the last line of stderr is the timing line, for `packages`
+/// Packages and `requests` (e.g. `2 registry requests`), whatever the
+/// duration.
+fn assert_timing_line(assert: &assert_cmd::assert::Assert, packages: usize, requests: &str) {
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr);
+    let last = stderr
+        .strip_suffix('\n')
+        .and_then(|s| s.rsplit('\n').next())
+        .unwrap_or_default();
+    let pattern = format!(r"^licguard: {packages} packages in (\d\.\d|[1-9]\d+) s \({requests}\)$");
+    assert!(
+        predicate::str::is_match(pattern).unwrap().eval(last),
+        "stderr does not end with the timing line:\n{stderr}"
+    );
+}
+
+#[test]
+fn timings_prints_the_packages_and_registry_requests_of_a_cold_run_on_stderr() {
+    let project = project_with_ms_on_the_registry();
+    let assert = project.check_with(&["--timings"]).code(1);
+    assert_timing_line(&assert, 6, "2 registry requests");
+}
+
+#[test]
+fn timings_of_list_and_waive_count_the_evaluated_packages_and_no_request_on_a_warm_cache() {
+    let project = project_with_ms_on_the_registry()
+        .with_registry_response("/@types%2Fms/0.7.34", &[(200, r#"{"license":"ISC"}"#)])
+        .edit_lockfile(add_dev_dependency);
+    let assert = project.list_with(&["--timings"]).success();
+    assert_timing_line(&assert, 6, "2 registry requests");
+    let assert = project.list_with(&["--timings", "--include-dev"]).success();
+    assert_timing_line(&assert, 7, "0 registry requests");
+    let assert = project
+        .waive_with(&[&WAIVE_ALL[..], &["--timings"]].concat())
+        .success();
+    assert_timing_line(&assert, 6, "0 registry requests");
+    assert_eq!(project.registry.requests().len(), 2);
+}
+
+#[test]
+fn timings_counts_the_retried_registry_requests() {
+    let project = project_licensed_by_the_registry().with_registry_response(
+        "/ms/2.1.3",
+        &[(503, ""), (0, ""), (200, r#"{"license":"MIT"}"#)],
+    );
+    let assert = project.check_with(&["--timings"]).code(1);
+    // `ms` takes 3 attempts, `@types/ms` gets a 404.
+    assert_timing_line(&assert, 6, "4 registry requests");
+    assert_eq!(project.registry.requests().len(), 4);
+}
+
+#[test]
+fn timings_counts_no_registry_request_offline() {
+    let project = project_with_ms_on_the_registry();
+    let assert = project.check_with(&["--offline", "--timings"]).code(1);
+    assert_timing_line(&assert, 6, "0 registry requests");
+    let assert = project.list_with(&["--offline", "--timings"]).success();
+    assert_timing_line(&assert, 6, "0 registry requests");
+    // Exits 1: the Unresolved Packages cannot be waived.
+    let assert = project
+        .waive_with(&[&WAIVE_ALL[..], &["--offline", "--timings"]].concat())
+        .code(1);
+    assert_timing_line(&assert, 6, "0 registry requests");
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+}
+
+#[test]
+fn timings_says_request_for_a_single_one() {
+    // A warm cache, but `@types/ms` got a 404, which is not cached.
+    let project = project_with_ms_on_the_registry();
+    project.check().code(1);
+    let assert = project.check_with(&["--timings"]).code(1);
+    assert_timing_line(&assert, 6, "1 registry request");
+}
+
+/// Runs `licguard <command>` on the Project with `args`, then with `args`
+/// and `--timings`, from the same `licguard.toml` and an empty job summary
+/// each time. Asserts that the first run prints no timing line, and that
+/// the second one only adds it to stderr: same stdout, exit code, job
+/// summary and Project `files`.
+fn assert_timings_only_add_the_line_to_stderr(
+    project: &Project,
+    command: &str,
+    args: &[&str],
+    files: &[&str],
+) {
+    let policy = project.policy_file();
+    let summary = project.path().join("summary.md");
+    let run = |args: &[&str]| {
+        fs::write(project.path().join("licguard.toml"), &policy).unwrap();
+        fs::write(&summary, "").unwrap();
+        let assert = project.run(command, args);
+        let files: Vec<String> = [&["summary.md"], files]
+            .concat()
+            .iter()
+            .map(|file| fs::read_to_string(project.path().join(file)).unwrap())
+            .collect();
+        (assert, files)
+    };
+    let case = format!("{command} {args:?}");
+    let (plain, plain_files) = run(args);
+    let (timed, timed_files) = run(&[args, &["--timings"]].concat());
+    let (plain_output, timed_output) = (plain.get_output(), timed.get_output());
+    let plain_stderr = String::from_utf8_lossy(&plain_output.stderr);
+    assert!(
+        !plain_stderr.contains(" packages in "),
+        "{case}: {plain_stderr}"
+    );
+    assert_timing_line(&timed, 6, "0 registry requests");
+    let timed_stderr = String::from_utf8_lossy(&timed_output.stderr);
+    assert!(
+        timed_stderr.starts_with(&*plain_stderr),
+        "{case}: {timed_stderr}"
+    );
+    assert_eq!(
+        timed_stderr.lines().count(),
+        plain_stderr.lines().count() + 1,
+        "{case}"
+    );
+    assert_eq!(timed_output.stdout, plain_output.stdout, "{case}");
+    assert_eq!(timed_output.status, plain_output.status, "{case}");
+    assert_eq!(timed_files, plain_files, "{case}");
+}
+
+#[test]
+fn timings_only_add_the_line_to_stderr_never_to_stdout_or_output_files() {
+    // Local licenses only, with a Violation, so that runs exit 1 and send
+    // no registry request.
+    let project = in_github_workspace(Project::from_fixture("npm-basic").with_policy(DENY_ISC));
+    let summary = project.path().join("summary.md");
+    let project = project.with_env("GITHUB_STEP_SUMMARY", summary.to_str().unwrap());
+    let output = project.path().join("report.out");
+    let output = output.to_str().unwrap();
+    for (command, format) in [
+        ("check", "text"),
+        ("check", "json"),
+        ("check", "github"),
+        ("list", "table"),
+        ("list", "json"),
+    ] {
+        let args = ["--format", format];
+        assert_timings_only_add_the_line_to_stderr(&project, command, &args, &[]);
+        let args = ["--format", format, "--output", output];
+        assert_timings_only_add_the_line_to_stderr(&project, command, &args, &["report.out"]);
+    }
+    assert_timings_only_add_the_line_to_stderr(&project, "waive", &WAIVE_ALL, &["licguard.toml"]);
+}
+
+#[test]
+fn timings_prints_no_line_on_a_runtime_error() {
+    let project =
+        project_licensed_by_the_registry().with_registry_response("/ms/2.1.3", &[(503, "")]);
+    project
+        .check_with(&["--timings"])
+        .code(2)
+        .stderr(predicate::str::contains(" packages in ").not());
+    let project = Project::from_fixture("npm-basic").with_policy(DENY_ISC);
+    let output = project.path().join("missing/report.txt");
+    for command in ["check", "list"] {
+        project
+            .run(
+                command,
+                &["--timings", "--output", output.to_str().unwrap()],
+            )
+            .code(2)
+            .stderr(predicate::str::contains("cannot write"))
+            .stderr(predicate::str::contains(" packages in ").not());
+    }
+}
+
+#[test]
+fn help_documents_timings() {
+    for command in ["check", "list", "waive"] {
+        Command::cargo_bin("licguard")
+            .unwrap()
+            .args([command, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("--timings"))
+            .stdout(predicate::str::contains(
+                "Print how long the run took and how many registry requests it sent on stderr, as when stderr is a terminal",
+            ));
+    }
+}

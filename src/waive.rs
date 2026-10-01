@@ -9,13 +9,13 @@ use anyhow::{Result, anyhow, bail};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 use crate::date::Date;
-use crate::evaluation::{self, Evaluated, Remote};
+use crate::evaluation::{self, Evaluated, Evaluation, Remote};
 use crate::policy::CONFIG;
 
 /// Writes a Waiver for each Violation of the Project at `root`, as `check`
 /// with the same `strict`, `include_dev` and `remote` would report them, and
 /// prints what it did. Fails (exit 1) when an Unresolved Violation could not
-/// be waived.
+/// be waived. Also returns the Evaluation the Waivers come from.
 pub fn waive(
     root: &Path,
     all_violations: bool,
@@ -24,7 +24,7 @@ pub fn waive(
     strict: bool,
     include_dev: bool,
     remote: &Remote,
-) -> Result<ExitCode> {
+) -> Result<(ExitCode, Evaluation)> {
     if !all_violations {
         bail!(
             "`--all-violations` is required\nhint: it is the only supported mode for now: pass `--all-violations` to waive every current Violation"
@@ -62,7 +62,7 @@ pub fn waive(
         .collect();
     if violations.is_empty() {
         println!("nothing to waive");
-        return Ok(ExitCode::SUCCESS);
+        return Ok((ExitCode::SUCCESS, evaluation));
     }
     // A Waiver needs a Normalized license: an Unresolved Package needs a
     // License clarification instead.
@@ -72,7 +72,7 @@ pub fn waive(
         write(root, &waivable, reason, expires)?;
     }
     if unresolved.is_empty() {
-        return Ok(ExitCode::SUCCESS);
+        return Ok((ExitCode::SUCCESS, evaluation));
     }
     for e in &unresolved {
         eprintln!(
@@ -83,7 +83,7 @@ pub fn waive(
     eprintln!(
         "hint: add a License clarification with evidence of its real license, then run `licguard waive` again"
     );
-    Ok(ExitCode::from(1))
+    Ok((ExitCode::from(1), evaluation))
 }
 
 /// Writes a Waiver for each of `violations` to the Project's `licguard.toml`,

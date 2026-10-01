@@ -188,7 +188,7 @@ The first origin that declares a license wins, even if that Declared license lat
 | `check --format` | `text`, `json`, `github` | `sarif` |
 | `list --format` | `table`, `json` | `csv` |
 
-**Main options**: `--config <FILE>`, `--output <FILE>`, `--include-dev`, `--strict`, `--offline`, `--refresh`, `--cache-dir <DIR>`, `--group-by license|verdict` (`list`), `--ecosystem npm,maven`, `--quiet`, `--verbose`, `--diff <GIT_REF>` (P1).
+**Main options**: `--config <FILE>`, `--output <FILE>`, `--include-dev`, `--strict`, `--offline`, `--refresh`, `--cache-dir <DIR>`, `--timings`, `--group-by license|verdict` (`list`), `--ecosystem npm,maven`, `--quiet`, `--verbose`, `--diff <GIT_REF>` (P1).
 
 **Exit codes**
 
