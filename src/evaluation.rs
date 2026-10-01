@@ -24,6 +24,8 @@ pub struct Evaluation {
     pub evaluated: Vec<Evaluated>,
     /// Sorted in reporting order.
     pub warnings: Vec<Warning>,
+    /// How many requests were sent to the registry, retries included.
+    pub requests: usize,
 }
 
 /// One Package evaluated against the Policy.
@@ -93,7 +95,7 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
     let today = Date::today()?;
     let include_dev = include_dev || policy.include_dev;
     let mut inventory = inventory::inventory(project)?;
-    fetch_licenses(&mut inventory, &policy, remote)?;
+    let requests = fetch_licenses(&mut inventory, &policy, remote)?;
     // Matched against the whole inventory: a clarification for an
     // excluded `dev` Dependency still applies to something.
     let mut warnings: Vec<Warning> = policy
@@ -190,6 +192,7 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
         sources: inventory.sources,
         evaluated,
         warnings,
+        requests,
     })
 }
 
@@ -198,8 +201,8 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
 /// covers, `dev` ones included: Waivers and clarifications are matched
 /// against the whole inventory. The registry's answers come from the cache
 /// when it has them and `remote` does not refresh it, else from the network
-/// unless `remote` is offline.
-fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -> Result<()> {
+/// unless `remote` is offline. Returns how many requests were sent.
+fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -> Result<usize> {
     // Checked even when no Package needs it, so that a wrong value is
     // reported at once.
     let registry = if remote.offline {
@@ -219,7 +222,7 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -
         })
         .collect();
     if missing.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     // The cache belongs to a registry, even offline.
     let registry = match registry {
@@ -236,7 +239,7 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -
         }
     }
     let packages: Vec<&Package> = to_fetch.iter().map(|p| &p.package).collect();
-    let answers = registry::answers(&registry, &packages);
+    let (answers, requests) = registry::answers(&registry, &packages);
     // The first failure in Package order.
     let mut failure = None;
     for (p, answer) in to_fetch.into_iter().zip(answers) {
@@ -254,7 +257,7 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -
     }
     // Even after a failure, so that the next run need not fetch them again.
     cache.save();
-    failure.map_or(Ok(()), Err)
+    failure.map_or(Ok(requests), Err)
 }
 
 /// Gives `package` the Declared license the registry declares for it, if

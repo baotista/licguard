@@ -11,6 +11,7 @@ mod policy;
 mod registry;
 mod report;
 mod table;
+mod timing;
 mod waive;
 mod waiver;
 mod warning;
@@ -18,6 +19,7 @@ mod warning;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand};
@@ -61,6 +63,9 @@ enum Command {
         output: Option<PathBuf>,
         #[command(flatten)]
         remote: Remote,
+        /// Print how long the run took and how many registry requests it sent on stderr, as when stderr is a terminal
+        #[arg(long)]
+        timings: bool,
     },
     /// Show every Package with its license, Verdict and License origin
     #[command(after_help = EVALUATION_HELP)]
@@ -82,6 +87,9 @@ enum Command {
         output: Option<PathBuf>,
         #[command(flatten)]
         remote: Remote,
+        /// Print how long the run took and how many registry requests it sent on stderr, as when stderr is a terminal
+        #[arg(long)]
+        timings: bool,
     },
     /// Write a neutral template Policy to the Project's licguard.toml
     Init {
@@ -115,6 +123,9 @@ enum Command {
         include_dev: bool,
         #[command(flatten)]
         remote: Remote,
+        /// Print how long the run took and how many registry requests it sent on stderr, as when stderr is a terminal
+        #[arg(long)]
+        timings: bool,
     },
 }
 
@@ -132,8 +143,9 @@ enum ListFormat {
 }
 
 fn main() -> ExitCode {
+    let start = Instant::now();
     let cli = Cli::parse();
-    match run(cli) {
+    match run(cli, start) {
         Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err:#}");
@@ -142,7 +154,9 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<ExitCode> {
+/// Runs the command of `cli`; `start` is when the run started, for its
+/// timing line.
+fn run(cli: Cli, start: Instant) -> Result<ExitCode> {
     match cli.command {
         Command::Check {
             path,
@@ -151,6 +165,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             format,
             output,
             remote,
+            timings,
         } => {
             let evaluation = evaluation::evaluate(&path, include_dev, &remote)?;
             let violated = evaluation
@@ -166,6 +181,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 }
             };
             emit(&out, output.as_deref())?;
+            timing::print(timings, start, &evaluation);
             Ok(if violated {
                 ExitCode::from(1)
             } else {
@@ -179,6 +195,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
             group_by,
             output,
             remote,
+            timings,
         } => {
             if matches!(format, ListFormat::Json) && group_by.is_some() {
                 bail!(
@@ -191,6 +208,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 ListFormat::Json => json::list(&evaluation),
             };
             emit(&out, output.as_deref())?;
+            timing::print(timings, start, &evaluation);
             Ok(ExitCode::SUCCESS)
         }
         Command::Init { path, force } => {
@@ -205,15 +223,20 @@ fn run(cli: Cli) -> Result<ExitCode> {
             strict,
             include_dev,
             remote,
-        } => waive::waive(
-            &path,
-            all_violations,
-            reason.as_deref(),
-            expires.as_deref(),
-            strict,
-            include_dev,
-            &remote,
-        ),
+            timings,
+        } => {
+            let (code, evaluation) = waive::waive(
+                &path,
+                all_violations,
+                reason.as_deref(),
+                expires.as_deref(),
+                strict,
+                include_dev,
+                &remote,
+            )?;
+            timing::print(timings, start, &evaluation);
+            Ok(code)
+        }
     }
 }
 

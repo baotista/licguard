@@ -116,7 +116,8 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ runner.temp }}/licguard-cache
-        key: licguard-${{ runner.os }}-${{ hashFiles(format('{0}/**/package-lock.json', inputs.path), format('{0}/**/yarn.lock', inputs.path), format('{0}/**/pnpm-lock.yaml', inputs.path)) }}
+        # Lockfiles under node_modules are not Inventory sources.
+        key: licguard-${{ runner.os }}-${{ hashFiles(format('{0}/**/package-lock.json', inputs.path), format('{0}/**/yarn.lock', inputs.path), format('{0}/**/pnpm-lock.yaml', inputs.path), format('!{0}/**/node_modules/**', inputs.path)) }}
         restore-keys: licguard-${{ runner.os }}-
 
     - name: Check licenses
@@ -136,7 +137,8 @@ runs:
         esac
 
         # ARGS is split on whitespace, without glob expansion. GitHub runs
-        # bash with -e, which would exit on licguard's failure.
+        # bash with -e, which would exit on licguard's failure. No
+        # --timings: ARGS may pass it, and passing it twice is an error.
         set -f +e
         # shellcheck disable=SC2086
         licguard check --format github $ARGS "$PROJECT"
