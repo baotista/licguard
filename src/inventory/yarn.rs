@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 
-use super::{Ecosystem, LicenseOrigin, LicensedPackage, Package, Scope, npm, paths};
+use super::{LicenseOrigin, LicensedPackage, Package, Scope, npm, paths};
+use crate::ecosystem::Ecosystem;
 
 mod berry;
 mod v1;

@@ -4,7 +4,7 @@ A fast, single-binary CLI that inventories your project's open source dependenci
 
 > **Status: pre-alpha.** Nothing is usable yet. See the [PRD](docs/prd.md) for the plan.
 
-- npm first (`package-lock.json`, yarn, pnpm), Java (Maven, Gradle via CycloneDX SBOM) next.
+- npm first (`package-lock.json`, yarn, pnpm), and CycloneDX JSON SBOMs of npm and Maven packages; Java Projects (Maven, Gradle via their SBOM plugins) next.
 - Policy in a versioned `licguard.toml`: allow, review and deny lists, dated waivers, and license clarifications for packages with wrong metadata.
 - Deterministic exit codes, JSON output, and GitHub annotations.
 - No telemetry; nothing leaves your machine except queries to the package registries.

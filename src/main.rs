@@ -1,6 +1,7 @@
 mod cache;
 mod clarification;
 mod date;
+mod ecosystem;
 mod evaluation;
 mod github;
 mod init;

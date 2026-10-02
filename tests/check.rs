@@ -534,7 +534,7 @@ fn missing_lockfile_is_a_runtime_error() {
         .check()
         .code(2)
         .stderr(predicate::str::contains(
-            "no package-lock.json, yarn.lock or pnpm-lock.yaml found under",
+            "no package-lock.json, yarn.lock, pnpm-lock.yaml or CycloneDX SBOM (bom.json, *.cdx.json) found under",
         ))
         .stderr(predicate::str::contains("hint:"));
 }
@@ -2991,6 +2991,644 @@ fn pnpm_lockfile_is_aggregated_with_the_other_inventory_sources() {
         ));
 }
 
+/// `maven-basic` is a real Maven Project and its SBOM, `target/bom.json`,
+/// written by `mvn org.cyclonedx:cyclonedx-maven-plugin:2.9.3:makeAggregateBom
+/// -DoutputFormat=json -DincludeTestScope=true`: the root `app` depends on
+/// `org.slf4j:slf4j-api` (MIT), `org.apache.commons:commons-text`
+/// (Apache-2.0, which pulls `org.apache.commons:commons-lang3`) and, in the
+/// `test` scope, `junit:junit` (EPL-1.0, which pulls
+/// `org.hamcrest:hamcrest-core`, BSD-3-Clause). The plugin marks every
+/// component `required`, the test-scoped ones included.
+const MAVEN_SBOM: &str = "target/bom.json";
+
+const MAVEN_POLICY: &str = r#"
+    [policy]
+    allow = ["MIT", "Apache-2.0", "BSD-3-Clause"]
+    review = ["EPL-1.0"]
+"#;
+
+#[test]
+fn cyclonedx_sbom_is_an_inventory_source_of_maven_packages() {
+    Project::from_fixture("maven-basic")
+        .with_policy(MAVEN_POLICY)
+        .list_with(&[])
+        .success()
+        .stdout(format!(
+            "licguard {} — 5 packages (maven)\n\n\
+             REVIEW  EPL-1.0       junit:junit@4.13.2                       listed  sbom  via app > junit:junit\n\
+             ALLOW   Apache-2.0    org.apache.commons:commons-lang3@3.14.0  listed  sbom  via app > org.apache.commons:commons-text > org.apache.commons:commons-lang3\n\
+             ALLOW   Apache-2.0    org.apache.commons:commons-text@1.12.0   listed  sbom  via app > org.apache.commons:commons-text\n\
+             ALLOW   BSD-3-Clause  org.hamcrest:hamcrest-core@1.3           listed  sbom  via app > junit:junit > org.hamcrest:hamcrest-core\n\
+             ALLOW   MIT           org.slf4j:slf4j-api@2.0.13               listed  sbom  via app > org.slf4j:slf4j-api\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
+/// The `maven-basic` Project with its SBOM edited by `edit`.
+fn maven_project(edit: impl FnOnce(&mut serde_json::Value)) -> Project {
+    let project = Project::from_fixture("maven-basic").with_policy(MAVEN_POLICY);
+    let path = project.path().join(MAVEN_SBOM);
+    let mut bom: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut bom);
+    fs::write(path, serde_json::to_string_pretty(&bom).unwrap()).unwrap();
+    project
+}
+
+#[test]
+fn cyclonedx_spec_versions_1_4_to_1_6_are_supported() {
+    for version in ["1.4", "1.5", "1.6"] {
+        maven_project(|bom| bom["specVersion"] = version.into())
+            .check()
+            .success()
+            .stdout(predicate::str::contains("5 packages (maven)"));
+    }
+}
+
+#[test]
+fn cyclonedx_spec_version_other_than_1_4_to_1_6_is_rejected_with_a_fix() {
+    for version in ["1.3", "1.7", "2.0"] {
+        maven_project(|bom| bom["specVersion"] = version.into())
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "target/bom.json uses CycloneDX specVersion {version}, which is not supported"
+            )))
+            .stderr(predicate::str::contains(
+                "hint: regenerate it in CycloneDX 1.4, 1.5 or 1.6",
+            ));
+    }
+}
+
+#[test]
+fn list_json_names_the_ecosystem_and_coordinates_of_a_maven_package() {
+    let json = stdout_json(
+        Project::from_fixture("maven-basic")
+            .with_policy(MAVEN_POLICY)
+            .list_with(&["--format", "json"])
+            .success(),
+    );
+    assert_eq!(
+        json_package(&json["packages"], "org.hamcrest:hamcrest-core", "1.3"),
+        &serde_json::json!({
+            "ecosystem": "maven",
+            "name": "org.hamcrest:hamcrest-core",
+            "version": "1.3",
+            "scope": "prod",
+            "declared_license": "BSD-3-Clause",
+            "license": "BSD-3-Clause",
+            "elected": null,
+            "verdict": "allow",
+            "reason": "listed",
+            "origin": "sbom",
+            "introduction_path": ["app", "junit:junit", "org.hamcrest:hamcrest-core"],
+            "sources": ["target/bom.json"],
+        })
+    );
+}
+
+#[test]
+fn sbom_is_found_under_the_names_and_build_directories_of_the_cyclonedx_tools() {
+    for target in [
+        "build/reports/bom.json",
+        "target/bom.cdx.json",
+        "sboms/app.cdx.json",
+    ] {
+        Project::from_fixture("maven-basic")
+            .with_policy(MAVEN_POLICY)
+            .rename(MAVEN_SBOM, "sbom.json")
+            .remove("target")
+            .write(target, "")
+            .rename("sbom.json", target)
+            .list_with(&["--format", "json"])
+            .success()
+            .stdout(predicate::str::contains(format!(
+                r#""sources": [
+        "{target}"
+      ]"#
+            )));
+    }
+}
+
+#[test]
+fn sboms_in_node_modules_and_hidden_directories_are_ignored() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .write("node_modules/once/bom.json", "not an SBOM")
+        .write(".cache/app.cdx.json", "not an SBOM")
+        .check()
+        .success()
+        .stdout(predicate::str::contains("6 packages (npm)"));
+}
+
+#[test]
+fn sbom_file_that_is_not_a_cyclonedx_bom_is_a_runtime_error() {
+    for (file, contents) in [
+        ("bom.json", r#"{"name": "app", "components": "none"}"#),
+        ("reports/app.cdx.json", "not JSON"),
+        ("bom.json", r#"{"bomFormat": "SPDX", "specVersion": "1.6"}"#),
+        (
+            "bom.json",
+            r#"{"bomFormat": "CycloneDX", "specVersion": "1.6", "components": "none"}"#,
+        ),
+    ] {
+        Project::from_fixture("npm-basic")
+            .with_policy(ALLOW_ALL)
+            .write(file, contents)
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "{file} is not a CycloneDX JSON SBOM"
+            )))
+            .stderr(predicate::str::contains(
+                "hint: licguard reads every bom.json and *.cdx.json file as a CycloneDX SBOM",
+            ));
+    }
+}
+
+/// `npm-sbom` is the real `npm-basic` Project and its SBOM, `bom.cdx.json`,
+/// written by `npx @cyclonedx/cyclonedx-npm` 6.0.1, which nests the
+/// components of nested `node_modules` (here `ms@2.1.2` in `debug`).
+#[test]
+fn cyclonedx_sbom_is_an_inventory_source_of_npm_packages() {
+    Project::from_fixture("npm-sbom")
+        .with_policy(ALLOW_ALL)
+        .list_with(&[])
+        .success()
+        .stdout(format!(
+            "licguard {} — 6 packages (npm)\n\n\
+             ALLOW  MIT  @types/ms@0.7.34  listed  sbom  via app > @types/ms\n\
+             ALLOW  MIT  debug@4.3.4       listed  sbom  via app > debug\n\
+             ALLOW  MIT  ms@2.1.2          listed  sbom  via app > debug > ms\n\
+             ALLOW  MIT  ms@2.1.3          listed  sbom  via app > ms\n\
+             ALLOW  ISC  once@1.4.0        listed  sbom  via app > once\n\
+             ALLOW  ISC  wrappy@1.0.2      listed  sbom  via app > once > wrappy\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
+/// Sets the `scope` of the component of `maven-basic` named `name`.
+fn set_component_scope(bom: &mut serde_json::Value, name: &str, scope: &str) {
+    let component = bom["components"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|c| c["name"] == name)
+        .unwrap();
+    component["scope"] = scope.into();
+}
+
+#[test]
+fn optional_and_excluded_components_are_dev() {
+    let project = maven_project(|bom| {
+        set_component_scope(bom, "junit", "optional");
+        set_component_scope(bom, "hamcrest-core", "excluded");
+    });
+    project
+        .check()
+        .success()
+        .stdout(predicate::str::contains("3 packages (maven)"))
+        .stdout(predicate::str::contains("junit").not());
+    let list = stdout_json(project.list_with(&["--include-dev", "--format", "json"]));
+    let scopes: Vec<(&str, &str)> = list["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["name"].as_str().unwrap(), p["scope"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        scopes,
+        [
+            ("junit:junit", "dev"),
+            ("org.apache.commons:commons-lang3", "prod"),
+            ("org.apache.commons:commons-text", "prod"),
+            ("org.hamcrest:hamcrest-core", "dev"),
+            ("org.slf4j:slf4j-api", "prod"),
+        ]
+    );
+}
+
+#[test]
+fn prod_component_path_goes_through_prod_components_only() {
+    let lang = "pkg:maven/org.apache.commons/commons-lang3@3.14.0?type=jar";
+    maven_project(|bom| {
+        set_component_scope(bom, "junit", "optional");
+        // `junit` sorts first, so it would give the path on a tie.
+        let junit = bom["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|d| d["ref"] == "pkg:maven/junit/junit@4.13.2?type=jar")
+            .unwrap();
+        junit["dependsOn"].as_array_mut().unwrap().push(lang.into());
+    })
+    .list_with(&["--include-dev"])
+    .success()
+    .stdout(predicate::str::contains(
+        "org.apache.commons:commons-lang3@3.14.0  listed  sbom  via app > org.apache.commons:commons-text > org.apache.commons:commons-lang3\n",
+    ));
+}
+
+#[test]
+fn components_with_the_same_coordinates_are_one_package_prod_if_any_is() {
+    maven_project(|bom| {
+        set_component_scope(bom, "junit", "optional");
+        let components = bom["components"].as_array_mut().unwrap();
+        let mut tests = components
+            .iter()
+            .find(|c| c["name"] == "junit")
+            .unwrap()
+            .clone();
+        let purl = "pkg:maven/junit/junit@4.13.2?classifier=tests&type=test-jar";
+        tests["bom-ref"] = purl.into();
+        tests["purl"] = purl.into();
+        tests["scope"] = "required".into();
+        components.push(tests);
+        bom["dependencies"][0]["dependsOn"]
+            .as_array_mut()
+            .unwrap()
+            .push(purl.into());
+    })
+    .check()
+    .success()
+    .stdout(predicate::str::contains("5 packages (maven)"))
+    .stdout(predicate::str::contains(
+        "REVIEW  EPL-1.0         junit:junit@4.13.2  via app > junit:junit\n",
+    ));
+}
+
+#[test]
+fn component_unreachable_from_the_root_is_prod_without_a_path() {
+    maven_project(|bom| {
+        bom["dependencies"][0]["dependsOn"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|r| r != "pkg:maven/junit/junit@4.13.2?type=jar");
+    })
+    .check()
+    .success()
+    .stdout(predicate::str::contains("5 packages (maven)"))
+    .stdout(predicate::str::contains(
+        "REVIEW  EPL-1.0         junit:junit@4.13.2\n",
+    ));
+}
+
+/// The Declared license, Normalized license and License origin that `list`
+/// gives `junit:junit` when its component's `licenses` are `licenses`.
+fn junit_license(licenses: serde_json::Value) -> [serde_json::Value; 3] {
+    let project = maven_project(|bom| {
+        let components = bom["components"].as_array_mut().unwrap();
+        let junit = components
+            .iter_mut()
+            .find(|c| c["name"] == "junit")
+            .unwrap();
+        junit["licenses"] = licenses;
+    });
+    let list = stdout_json(project.list_with(&["--format", "json"]));
+    let junit = json_package(&list["packages"], "junit:junit", "4.13.2");
+    ["declared_license", "license", "origin"].map(|key| junit[key].clone())
+}
+
+#[test]
+fn component_license_id_else_name_is_its_declared_license() {
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"id": "MIT", "name": "Apache License, Version 2.0"}}
+        ])),
+        ["MIT", "MIT", "sbom"]
+    );
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"name": "Apache License, Version 2.0"}}
+        ])),
+        ["Apache License, Version 2.0", "Apache-2.0", "sbom"]
+    );
+}
+
+#[test]
+fn component_license_expression_is_its_declared_license() {
+    assert_eq!(
+        junit_license(serde_json::json!([{"expression": "EPL-1.0 OR Apache-2.0"}])),
+        ["EPL-1.0 OR Apache-2.0", "EPL-1.0 OR Apache-2.0", "sbom"]
+    );
+}
+
+#[test]
+fn several_component_licenses_all_apply() {
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"id": "EPL-1.0"}},
+            {"expression": "MIT OR Apache-2.0"},
+        ])),
+        [
+            "EPL-1.0 AND (MIT OR Apache-2.0)",
+            "EPL-1.0 AND (MIT OR Apache-2.0)",
+            "sbom"
+        ]
+    );
+    // A license name that reads as a choice is a choice within its entry
+    // only: it never offers a way out of the other entries.
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"name": "MIT or Apache License, Version 2.0"}},
+            {"license": {"id": "EPL-1.0"}},
+        ])),
+        [
+            "(MIT or Apache License, Version 2.0) AND EPL-1.0",
+            "(MIT OR Apache-2.0) AND EPL-1.0",
+            "sbom"
+        ]
+    );
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"name": "MIT/Apache-2.0"}},
+            {"license": {"id": "EPL-1.0"}},
+        ])),
+        [
+            "(MIT/Apache-2.0) AND EPL-1.0",
+            "(MIT OR Apache-2.0) AND EPL-1.0",
+            "sbom"
+        ]
+    );
+}
+
+#[test]
+fn component_license_with_only_a_url_is_unresolved() {
+    let licenses = serde_json::json!([
+        {"license": {"id": "MIT"}},
+        {"license": {"url": "https://www.eclipse.org/legal/epl-v10.html"}},
+    ]);
+    assert_eq!(
+        junit_license(licenses.clone()),
+        [
+            licenses.to_string().into(),
+            serde_json::Value::Null,
+            "sbom".into()
+        ]
+    );
+}
+
+#[test]
+fn maven_component_without_a_license_is_unresolved_without_a_registry_request() {
+    let project = maven_project(|bom| {
+        let components = bom["components"].as_array_mut().unwrap();
+        let junit = components
+            .iter_mut()
+            .find(|c| c["name"] == "junit")
+            .unwrap();
+        junit.as_object_mut().unwrap().remove("licenses");
+    });
+    project.check().code(1).stdout(predicate::str::contains(
+        "DENY    (unresolved)    junit:junit@4.13.2  via app > junit:junit\n",
+    ));
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+}
+
+#[test]
+fn clarification_of_a_maven_package_takes_priority_over_the_sbom_license() {
+    Project::from_fixture("maven-basic")
+        .with_policy(&format!(
+            "{MAVEN_POLICY}{}",
+            clarification("junit:junit", Some("4.13.2"), "MIT")
+        ))
+        .list_with(&[])
+        .success()
+        .stdout(predicate::str::contains(
+            "ALLOW  MIT           junit:junit@4.13.2                       listed  clarification  via app > junit:junit\n",
+        ));
+}
+
+#[test]
+fn waiver_of_a_maven_package_matches_its_group_and_artifact() {
+    Project::from_fixture("maven-basic")
+        .with_policy(&format!(
+            "{MAVEN_POLICY}{}",
+            waiver("junit:junit", Some("4.13.2"), "EPL-1.0")
+        ))
+        .check_with(&["--strict"])
+        .success()
+        .stdout(predicate::str::contains(
+            "0 deny · 0 review · 5 allow (1 waived)",
+        ));
+}
+
+#[test]
+fn waive_writes_the_waiver_of_a_maven_package_that_check_then_accepts() {
+    let project = Project::from_fixture("maven-basic").with_policy(MAVEN_POLICY);
+    project
+        .waive_with(&[&WAIVE_ALL[..], &["--strict"]].concat())
+        .success();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{MAVEN_POLICY}{}",
+            waived("junit:junit", "4.13.2", "EPL-1.0")
+        )
+    );
+    project.check_with(&["--strict"]).success();
+}
+
+/// `npm-sbom` without the `licenses` of its `once` and `wrappy` components,
+/// with the purl of `once` ending in `qualifiers`, under [`ALLOW_ALL`].
+fn npm_sbom_licensed_by_the_registry(qualifiers: &str) -> Project {
+    let project = Project::from_fixture("npm-sbom").with_policy(ALLOW_ALL);
+    let path = project.path().join("bom.cdx.json");
+    let mut bom: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for component in bom["components"].as_array_mut().unwrap() {
+        if component["name"] == "once" || component["name"] == "wrappy" {
+            component.as_object_mut().unwrap().remove("licenses");
+        }
+        if component["name"] == "once" {
+            component["purl"] = format!("pkg:npm/once@1.4.0{qualifiers}").into();
+        }
+    }
+    fs::write(path, serde_json::to_string_pretty(&bom).unwrap()).unwrap();
+    project
+        .with_registry_response("/once/1.4.0", &[(200, r#"{"license":"ISC"}"#)])
+        .with_registry_response("/wrappy/1.0.2", &[(200, r#"{"license":"ISC"}"#)])
+}
+
+#[test]
+fn npm_component_without_a_license_gets_it_from_the_registry() {
+    let project = npm_sbom_licensed_by_the_registry("");
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    let once = json_package(&json["packages"], "once", "1.4.0");
+    assert_eq!(once["license"], "ISC");
+    assert_eq!(once["origin"], "registry");
+    assert_eq!(project.registry.paths(), ["/once/1.4.0", "/wrappy/1.0.2"]);
+}
+
+#[test]
+fn npm_component_whose_purl_names_another_location_is_not_from_the_registry() {
+    for qualifiers in [
+        "?vcs_url=git%2Bhttps://github.com/isaacs/once.git",
+        "?download_url=https://example.com/once-1.4.0.tgz",
+        "?repository_url=https://npm.example.com",
+    ] {
+        let project = npm_sbom_licensed_by_the_registry(qualifiers);
+        assert_once_is_not_from_the_registry(&project, qualifiers);
+    }
+}
+
+/// `maven-basic` with a PyPI component, depended on by `slf4j-api`, and a
+/// component without a purl or `bom-ref`.
+fn maven_project_with_unsupported_components() -> Project {
+    maven_project(|bom| {
+        let components = bom["components"].as_array_mut().unwrap();
+        components.push(serde_json::json!({
+            "type": "library",
+            "bom-ref": "pkg:pypi/requests@2.31.0",
+            "name": "requests",
+            "version": "2.31.0",
+            "purl": "pkg:pypi/requests@2.31.0",
+        }));
+        components.push(serde_json::json!({
+            "type": "file",
+            "name": "vendor.jar",
+            "version": "1.0",
+        }));
+        let slf4j = bom["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|d| d["ref"] == "pkg:maven/org.slf4j/slf4j-api@2.0.13?type=jar")
+            .unwrap();
+        slf4j["dependsOn"] = serde_json::json!(["pkg:pypi/requests@2.31.0"]);
+    })
+}
+
+#[test]
+fn component_of_an_unsupported_ecosystem_is_a_warning_that_does_not_fail_the_gate() {
+    maven_project_with_unsupported_components()
+        .check()
+        .success()
+        .stdout(predicate::str::contains("5 packages (maven)"))
+        .stdout(predicate::str::contains(
+            "\n\nwarning: component pkg:pypi/requests@2.31.0 in target/bom.json is not checked: it has no npm or maven purl\n\
+             warning: component vendor.jar@1.0 in target/bom.json is not checked: it has no npm or maven purl\n\n",
+        ));
+}
+
+#[test]
+fn check_json_reports_unsupported_components_with_their_sbom() {
+    let json = stdout_json(
+        maven_project_with_unsupported_components()
+            .check_with(&["--format", "json"])
+            .success(),
+    );
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([
+            {
+                "kind": "unsupported_component",
+                "message": "component pkg:pypi/requests@2.31.0 in target/bom.json is not checked: it has no npm or maven purl",
+                "package": "pkg:pypi/requests@2.31.0",
+                "version": null,
+                "source": "target/bom.json",
+            },
+            {
+                "kind": "unsupported_component",
+                "message": "component vendor.jar@1.0 in target/bom.json is not checked: it has no npm or maven purl",
+                "package": "vendor.jar",
+                "version": "1.0",
+                "source": "target/bom.json",
+            },
+        ])
+    );
+}
+
+#[test]
+fn component_purl_without_a_version_takes_the_component_version_else_is_a_runtime_error() {
+    fn unversioned(bom: &mut serde_json::Value) -> &mut serde_json::Value {
+        let components = bom["components"].as_array_mut().unwrap();
+        let junit = components
+            .iter_mut()
+            .find(|c| c["name"] == "junit")
+            .unwrap();
+        junit["purl"] = "pkg:maven/junit/junit?type=jar".into();
+        junit
+    }
+    maven_project(|bom| {
+        unversioned(bom);
+    })
+    .check()
+    .success()
+    .stdout(predicate::str::contains("junit:junit@4.13.2"));
+    maven_project(|bom| {
+        unversioned(bom).as_object_mut().unwrap().remove("version");
+    })
+    .check()
+    .code(2)
+    .stderr(predicate::str::contains(
+        "target/bom.json: component `pkg:maven/junit/junit@4.13.2?type=jar` has no version",
+    ))
+    .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn introduction_path_goes_through_unsupported_components_by_their_name() {
+    let slf4j = "pkg:maven/org.slf4j/slf4j-api@2.0.13?type=jar";
+    maven_project(|bom| {
+        bom["components"].as_array_mut().unwrap().push(serde_json::json!({
+            "type": "library",
+            "bom-ref": "requests",
+            "name": "requests",
+            "version": "2.31.0",
+            "purl": "pkg:pypi/requests@2.31.0",
+        }));
+        let dependencies = bom["dependencies"].as_array_mut().unwrap();
+        let root = dependencies[0]["dependsOn"].as_array_mut().unwrap();
+        root.retain(|r| r != slf4j);
+        root.push("requests".into());
+        dependencies.push(serde_json::json!({"ref": "requests", "dependsOn": [slf4j]}));
+    })
+    .list_with(&[])
+    .success()
+    .stdout(predicate::str::contains(
+        "org.slf4j:slf4j-api@2.0.13               listed  sbom  via app > requests > org.slf4j:slf4j-api\n",
+    ));
+}
+
+/// The SBOM of the `npm-sbom` fixture.
+fn npm_sbom() -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/npm-sbom/bom.cdx.json"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn sbom_is_aggregated_with_the_other_inventory_sources() {
+    let output = Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .write("bom.cdx.json", &npm_sbom())
+        .list_with(&[])
+        .success()
+        .stdout(predicate::str::contains("6 packages (npm)"))
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert_eq!(
+        stdout
+            .matches("  in bom.cdx.json, package-lock.json\n")
+            .count(),
+        6,
+        "{stdout}"
+    );
+}
+
+#[test]
+fn header_names_every_ecosystem_of_the_project() {
+    Project::from_fixture("maven-basic")
+        .with_policy(&format!("{MAVEN_POLICY}\n    unlisted = \"allow\"\n"))
+        .write("web/bom.cdx.json", &npm_sbom())
+        .check()
+        .success()
+        .stdout(predicate::str::contains("11 packages (maven, npm)"));
+}
+
 /// `npm-basic` with one Package per Verdict reason and License origin, under
 /// [`DENY_ISC`]: `debug` is clarified, `ms@2.1.3` is Unresolved, `wrappy` is
 /// not installed.
@@ -3460,7 +4098,7 @@ fn list_exits_2_only_on_a_runtime_error() {
         .code(2)
         .stdout("")
         .stderr(predicate::str::contains(
-            "no package-lock.json, yarn.lock or pnpm-lock.yaml found under",
+            "no package-lock.json, yarn.lock, pnpm-lock.yaml or CycloneDX SBOM (bom.json, *.cdx.json) found under",
         ))
         .stderr(predicate::str::contains("hint:"));
 }
@@ -3993,6 +4631,54 @@ fn check_github_emits_a_warning_annotation_per_warning_on_the_policy_file() {
          ::warning file=licguard.toml,title=licguard%3A expired_waiver::waiver for once expired on 2026-05-31\n\
          0 deny · 0 review · 6 allow — ✓ Policy respected\n",
     );
+}
+
+#[test]
+fn check_github_annotates_a_violation_of_an_sbom_on_its_component() {
+    let deny_epl =
+        "[policy]\nallow = [\"MIT\", \"Apache-2.0\", \"BSD-3-Clause\"]\ndeny = [\"EPL-1.0\"]\n";
+    let project = in_github_workspace(Project::from_fixture("maven-basic").with_policy(deny_epl));
+    check_github(&project, &[]).code(1).stdout(
+        "::error file=target/bom.json,line=306,title=licguard%3A DENY EPL-1.0 junit%3Ajunit@4.13.2::EPL-1.0  via app > junit:junit\n\
+         1 deny · 0 review · 4 allow — ✗ Policy violated (exit 1)\n",
+    );
+    // A component without a `bom-ref` is found by its purl.
+    let project = in_github_workspace(
+        maven_project(|bom| {
+            let components = bom["components"].as_array_mut().unwrap();
+            let junit = components
+                .iter_mut()
+                .find(|c| c["name"] == "junit")
+                .unwrap();
+            junit.as_object_mut().unwrap().remove("bom-ref");
+        })
+        .with_policy(deny_epl),
+    );
+    let line = line_starting_with(
+        &project,
+        MAVEN_SBOM,
+        r#""purl": "pkg:maven/junit/junit@4.13.2"#,
+    );
+    check_github(&project, &[])
+        .code(1)
+        .stdout(predicate::str::starts_with(format!(
+            "::error file=target/bom.json,line={line},title=licguard%3A DENY EPL-1.0 junit%3Ajunit@4.13.2::EPL-1.0\n"
+        )));
+}
+
+#[test]
+fn check_github_annotates_an_unsupported_component_on_its_sbom() {
+    let project = in_github_workspace(maven_project_with_unsupported_components());
+    let line = line_starting_with(
+        &project,
+        MAVEN_SBOM,
+        r#""bom-ref": "pkg:pypi/requests@2.31.0""#,
+    );
+    check_github(&project, &[]).success().stdout(format!(
+        "::warning file=target/bom.json,line={line},title=licguard%3A unsupported_component::component pkg:pypi/requests@2.31.0 in target/bom.json is not checked: it has no npm or maven purl\n\
+         ::warning file=target/bom.json,title=licguard%3A unsupported_component::component vendor.jar@1.0 in target/bom.json is not checked: it has no npm or maven purl\n\
+         0 deny · 1 review · 4 allow — ✓ Policy respected\n",
+    ));
 }
 
 /// The 1-based number of the first line of the Project's `file` that starts

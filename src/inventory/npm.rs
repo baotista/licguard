@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 
-use super::{Ecosystem, LicenseOrigin, LicensedPackage, Package, Scope, paths};
+use super::{LicenseOrigin, LicensedPackage, Package, Scope, paths};
+use crate::ecosystem::Ecosystem;
 
 /// The file name of an npm Inventory source.
 pub const LOCKFILE: &str = "package-lock.json";

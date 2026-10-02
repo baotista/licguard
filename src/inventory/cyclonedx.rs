@@ -1,0 +1,317 @@
+//! CycloneDX JSON SBOMs as Inventory sources: their components, named by
+//! their purl, are the Packages of the ecosystems licguard supports.
+
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::Path;
+
+use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
+
+use super::purl::Purl;
+use super::{LicenseOrigin, LicensedPackage, Package, Scope, paths};
+use crate::ecosystem::Ecosystem;
+use crate::warning::Warning;
+
+/// Whether a file named `file_name` is read as a CycloneDX JSON SBOM:
+/// `bom.json` or `*.cdx.json`, the names CycloneDX recommends.
+pub fn is_sbom(file_name: &str) -> bool {
+    file_name == "bom.json" || file_name.ends_with(".cdx.json")
+}
+
+/// The CycloneDX specification versions licguard reads.
+const SPEC_VERSIONS: [&str; 3] = ["1.4", "1.5", "1.6"];
+
+/// For a file named like an SBOM that is not one.
+const NOT_A_BOM_HINT: &str = "hint: licguard reads every bom.json and *.cdx.json file as a CycloneDX SBOM; regenerate it in CycloneDX JSON format, or rename it if it is not an SBOM";
+
+/// What tells a CycloneDX BOM and its version, read before the rest.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Header {
+    bom_format: Option<String>,
+    spec_version: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Bom {
+    metadata: Option<Metadata>,
+    #[serde(default)]
+    components: Vec<Component>,
+    #[serde(default)]
+    dependencies: Vec<Dependency>,
+}
+
+#[derive(Deserialize)]
+struct Metadata {
+    /// What the SBOM describes: the root of the Introduction paths.
+    component: Option<Component>,
+}
+
+#[derive(Deserialize)]
+struct Component {
+    #[serde(rename = "bom-ref")]
+    bom_ref: Option<String>,
+    #[serde(default)]
+    name: String,
+    version: Option<String>,
+    purl: Option<String>,
+    /// `required` (the default), `optional` or `excluded`.
+    scope: Option<String>,
+    /// [`LicenseChoice`] entries, kept as written for [`declared_license`].
+    #[serde(default)]
+    licenses: Vec<serde_json::Value>,
+    /// Components nested in this one, e.g. npm's nested `node_modules`.
+    #[serde(default)]
+    components: Vec<Component>,
+}
+
+/// An entry of a component's `licenses`: a license or an SPDX expression.
+#[derive(Deserialize)]
+struct LicenseChoice {
+    license: Option<License>,
+    expression: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct License {
+    id: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Dependency {
+    #[serde(rename = "ref")]
+    reference: String,
+    #[serde(default, rename = "dependsOn")]
+    depends_on: Vec<String>,
+}
+
+/// Reads the SBOM at `source`, relative to `project`, and returns its
+/// Packages with the Declared license of their component. Each Package
+/// also gets its shortest Introduction path from the SBOM's root component,
+/// following its `dependencies`, when it is reachable from it. Also returns
+/// a Warning for each component that is no Package licguard supports.
+pub fn inventory(project: &Path, source: &str) -> Result<(Vec<LicensedPackage>, Vec<Warning>)> {
+    let path = project.join(source);
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let not_a_bom = |why: String| {
+        anyhow!(
+            "{} is not a CycloneDX JSON SBOM: {why}\n{NOT_A_BOM_HINT}",
+            path.display()
+        )
+    };
+    let header: Header = serde_json::from_str(&text).map_err(|err| not_a_bom(err.to_string()))?;
+    if header.bom_format.as_deref() != Some("CycloneDX") {
+        return Err(not_a_bom("its bomFormat is not `CycloneDX`".to_string()));
+    }
+    let version = header.spec_version.unwrap_or_default();
+    if !SPEC_VERSIONS.contains(&version.as_str()) {
+        bail!(
+            "{} uses CycloneDX specVersion {version}, which is not supported\nhint: regenerate it in CycloneDX 1.4, 1.5 or 1.6, the versions the current CycloneDX tools write",
+            path.display()
+        );
+    }
+    let bom: Bom = serde_json::from_str(&text).map_err(|err| not_a_bom(err.to_string()))?;
+
+    let root = bom.metadata.and_then(|metadata| metadata.component);
+    let root_ref = root.as_ref().and_then(|root| root.bom_ref.clone());
+    let mut components = Vec::new();
+    flatten(&bom.components, &mut components);
+    let by_ref: HashMap<&str, &Component> = components
+        .iter()
+        .filter_map(|c| Some((c.bom_ref.as_deref()?, *c)))
+        .collect();
+    let graph: HashMap<&str, &[String]> = bom
+        .dependencies
+        .iter()
+        .map(|d| (d.reference.as_str(), d.depends_on.as_slice()))
+        .collect();
+    let roots: Vec<(String, String)> = root
+        .as_ref()
+        .and_then(|root| Some((root.bom_ref.clone()?, root.name.clone())))
+        .into_iter()
+        .collect();
+    let introduction_paths = paths::shortest(&roots, |key: &String, prod_only| {
+        graph
+            .get(key.as_str())
+            .into_iter()
+            .flat_map(|refs| refs.iter())
+            .filter_map(|r| {
+                let child = by_ref.get(r.as_str())?;
+                if prod_only && child.scope() == Scope::Dev {
+                    return None;
+                }
+                let name = package(child).map_or_else(|| child.name.clone(), |(p, _)| p.name);
+                Some((name, r.clone()))
+            })
+            .collect()
+    });
+
+    let lines = value_lines(&text);
+
+    let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for component in components {
+        if component.bom_ref.is_some() && component.bom_ref == root_ref {
+            continue; // the root, listed again
+        }
+        let line = [("bom-ref", &component.bom_ref), ("purl", &component.purl)]
+            .into_iter()
+            .find_map(|(key, value)| lines.get(&(key, value.clone()?)).copied());
+        let Some((package, from_registry)) = package(component) else {
+            let (name, version) = component.identity();
+            warnings.push(Warning::UnsupportedComponent {
+                component: name,
+                version,
+                source: source.to_string(),
+                line,
+            });
+            continue;
+        };
+        if package.version.is_empty() {
+            bail!(
+                "{}: component `{}` has no version\nhint: regenerate the SBOM with a CycloneDX tool that records the version of each component",
+                path.display(),
+                component.identity().0
+            );
+        }
+        let declared_license = declared_license(&component.licenses);
+        let found = LicensedPackage {
+            license_origin: declared_license.as_ref().map(|_| LicenseOrigin::Sbom),
+            declared_license,
+            from_registry,
+            scope: component.scope(),
+            introduction_path: component
+                .bom_ref
+                .as_ref()
+                .and_then(|r| introduction_paths.get(r))
+                .map(|(path, _)| path.clone()),
+            sources: vec![source.to_string()],
+            line,
+            package: package.clone(),
+        };
+        // The same Package can be several components, e.g. nested ones.
+        match packages.entry(package) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(found);
+            }
+            Entry::Occupied(mut occupied) => occupied.get_mut().merge(found, true),
+        }
+    }
+    Ok((packages.into_values().collect(), warnings))
+}
+
+impl Component {
+    /// How reports name the component: by its `bom-ref`, which identifies
+    /// it in the SBOM, else by its name and version.
+    fn identity(&self) -> (String, Option<String>) {
+        match &self.bom_ref {
+            Some(bom_ref) => (bom_ref.clone(), None),
+            None => (self.name.clone(), self.version.clone()),
+        }
+    }
+
+    /// `Dev` when the component is `optional` or `excluded`, i.e. not
+    /// needed at run time; any other component may ship, so it is `Prod`.
+    fn scope(&self) -> Scope {
+        match self.scope.as_deref() {
+            Some("optional" | "excluded") => Scope::Dev,
+            _ => Scope::Prod,
+        }
+    }
+}
+
+/// The 1-based line of each `"bom-ref"` and `"purl"` value of an SBOM, by
+/// key and value: the first line that starts with that key and value, as
+/// the CycloneDX tools write them, one per line.
+fn value_lines(text: &str) -> HashMap<(&'static str, String), usize> {
+    let mut lines = HashMap::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim_start();
+        for key in ["bom-ref", "purl"] {
+            let Some(value) = line
+                .strip_prefix(&format!("\"{key}\""))
+                .and_then(|rest| rest.trim_start().strip_prefix(':'))
+            else {
+                continue;
+            };
+            let value = value.trim().trim_end_matches(',');
+            if let Ok(value) = serde_json::from_str::<String>(value) {
+                lines.entry((key, value)).or_insert(number + 1);
+            }
+        }
+    }
+    lines
+}
+
+/// Appends `components` and the components nested in them to `out`.
+fn flatten<'a>(components: &'a [Component], out: &mut Vec<&'a Component>) {
+    for component in components {
+        out.push(component);
+        flatten(&component.components, out);
+    }
+}
+
+/// The purl qualifiers that say where a Package comes from, when it is not
+/// its ecosystem's registry.
+const LOCATION_QUALIFIERS: [&str; 3] = ["repository_url", "download_url", "vcs_url"];
+
+/// The Package a component is, from its purl, and whether the purl says it
+/// comes from its ecosystem's registry: when it names no other location
+/// (see [`LOCATION_QUALIFIERS`]). `None` when the component has no purl, or
+/// one of an ecosystem licguard does not support. Other qualifiers, e.g.
+/// Maven's `type` and `classifier`, name files of the same Package. The
+/// version is the purl's, else the component's, else empty.
+fn package(component: &Component) -> Option<(Package, bool)> {
+    let purl = Purl::parse(component.purl.as_deref()?)?;
+    let ecosystem = Ecosystem::from_purl_type(&purl.kind)?;
+    let package = Package {
+        ecosystem,
+        name: ecosystem.package_name(purl.namespace.as_deref(), &purl.name),
+        // Checked by the caller, which knows the SBOM.
+        version: purl
+            .version
+            .or_else(|| component.version.clone())
+            .unwrap_or_default(),
+    };
+    let from_registry = !purl
+        .qualifiers
+        .iter()
+        .any(|key| LOCATION_QUALIFIERS.contains(&key.as_str()));
+    Some((package, from_registry))
+}
+
+/// The Declared license of a component's `licenses`: each entry's
+/// `license.id`, else its `license.name`, or its `expression`. Several
+/// entries all apply, so they are joined with `AND`, each in parentheses
+/// unless it is a single word. `None` when there is
+/// no entry. When an entry has none of them, e.g. only a `url`, it is the
+/// JSON text of `licenses`, which never normalizes: the Package is
+/// Unresolved rather than taking the license of its other entries.
+fn declared_license(licenses: &[serde_json::Value]) -> Option<String> {
+    if licenses.is_empty() {
+        return None;
+    }
+    let terms: Option<Vec<String>> = licenses
+        .iter()
+        .map(|entry| {
+            let choice = LicenseChoice::deserialize(entry).ok()?;
+            let term = match (choice.license, choice.expression) {
+                (Some(license), _) => license.id.or(license.name)?,
+                (None, expression) => expression?,
+            };
+            // So that an `OR` in one entry, even an `or` or `/` in a name,
+            // offers no way out of the others.
+            let grouped =
+                licenses.len() > 1 && term.contains(|c: char| c.is_whitespace() || c == '/');
+            Some(if grouped { format!("({term})") } else { term })
+        })
+        .collect();
+    Some(terms.map_or_else(
+        || serde_json::Value::from(licenses).to_string(),
+        |terms| terms.join(" AND "),
+    ))
+}

@@ -33,6 +33,15 @@ pub enum Warning {
         expires: Date,
         days: u32,
     },
+    /// A component of the SBOM `source` that is no Package of a supported
+    /// ecosystem: it has no npm or maven purl. Named by its `bom-ref`, else
+    /// by its name and version; `line` is that of its entry, when known.
+    UnsupportedComponent {
+        component: String,
+        version: Option<String>,
+        source: String,
+        line: Option<usize>,
+    },
 }
 
 impl Warning {
@@ -43,6 +52,7 @@ impl Warning {
             Warning::UnmatchedWaiver { .. } => "unmatched_waiver",
             Warning::ExpiredWaiver { .. } => "expired_waiver",
             Warning::ExpiringWaiver { .. } => "expiring_waiver",
+            Warning::UnsupportedComponent { .. } => "unsupported_component",
         }
     }
 }
@@ -80,6 +90,21 @@ impl fmt::Display for Warning {
                     1 => write!(f, " expires in 1 day ({expires})"),
                     days => write!(f, " expires in {days} days ({expires})"),
                 }
+            }
+            Warning::UnsupportedComponent {
+                component,
+                version,
+                source,
+                ..
+            } => {
+                write!(f, "component {component}")?;
+                if let Some(version) = version {
+                    write!(f, "@{version}")?;
+                }
+                write!(
+                    f,
+                    " in {source} is not checked: it has no npm or maven purl"
+                )
             }
         }
     }
