@@ -58,8 +58,9 @@ struct Component {
     purl: Option<String>,
     /// `required` (the default), `optional` or `excluded`.
     scope: Option<String>,
+    /// [`LicenseChoice`] entries, kept as written for [`declared_license`].
     #[serde(default)]
-    licenses: Vec<LicenseChoice>,
+    licenses: Vec<serde_json::Value>,
     /// Components nested in this one, e.g. npm's nested `node_modules`.
     #[serde(default)]
     components: Vec<Component>,
@@ -214,16 +215,27 @@ fn package(component: &Component) -> Option<Package> {
 /// The Declared license of a component's `licenses`: each entry's
 /// `license.id`, else its `license.name`, or its `expression`. Several
 /// entries all apply, so they are joined with `AND`. `None` when there is
-/// no entry.
-fn declared_license(licenses: &[LicenseChoice]) -> Option<String> {
-    let terms: Vec<String> = licenses
+/// no entry. When an entry has none of them, e.g. only a `url`, it is the
+/// JSON text of `licenses`, which never normalizes: the Package is
+/// Unresolved rather than taking the license of its other entries.
+fn declared_license(licenses: &[serde_json::Value]) -> Option<String> {
+    if licenses.is_empty() {
+        return None;
+    }
+    let terms: Option<Vec<String>> = licenses
         .iter()
-        .filter_map(|choice| match (&choice.license, &choice.expression) {
-            (Some(license), _) => license.id.clone().or_else(|| license.name.clone()),
-            (None, Some(expression)) if licenses.len() > 1 => Some(format!("({expression})")),
-            (None, Some(expression)) => Some(expression.clone()),
-            (None, None) => None,
+        .map(|entry| {
+            let choice = LicenseChoice::deserialize(entry).ok()?;
+            match (choice.license, choice.expression) {
+                (Some(license), _) => license.id.or(license.name),
+                (None, Some(expression)) if licenses.len() > 1 => Some(format!("({expression})")),
+                (None, Some(expression)) => Some(expression),
+                (None, None) => None,
+            }
         })
         .collect();
-    (!terms.is_empty()).then(|| terms.join(" AND "))
+    Some(terms.map_or_else(
+        || serde_json::Value::from(licenses).to_string(),
+        |terms| terms.join(" AND "),
+    ))
 }

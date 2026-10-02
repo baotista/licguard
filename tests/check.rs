@@ -3246,6 +3246,93 @@ fn component_unreachable_from_the_root_is_prod_without_a_path() {
     ));
 }
 
+/// The Declared license, Normalized license and License origin that `list`
+/// gives `junit:junit` when its component's `licenses` are `licenses`.
+fn junit_license(licenses: serde_json::Value) -> [serde_json::Value; 3] {
+    let project = maven_project(|bom| {
+        let components = bom["components"].as_array_mut().unwrap();
+        let junit = components
+            .iter_mut()
+            .find(|c| c["name"] == "junit")
+            .unwrap();
+        junit["licenses"] = licenses;
+    });
+    let list = stdout_json(project.list_with(&["--format", "json"]));
+    let junit = json_package(&list["packages"], "junit:junit", "4.13.2");
+    ["declared_license", "license", "origin"].map(|key| junit[key].clone())
+}
+
+#[test]
+fn component_license_id_else_name_is_its_declared_license() {
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"id": "MIT", "name": "Apache License, Version 2.0"}}
+        ])),
+        ["MIT", "MIT", "sbom"]
+    );
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"name": "Apache License, Version 2.0"}}
+        ])),
+        ["Apache License, Version 2.0", "Apache-2.0", "sbom"]
+    );
+}
+
+#[test]
+fn component_license_expression_is_its_declared_license() {
+    assert_eq!(
+        junit_license(serde_json::json!([{"expression": "EPL-1.0 OR Apache-2.0"}])),
+        ["EPL-1.0 OR Apache-2.0", "EPL-1.0 OR Apache-2.0", "sbom"]
+    );
+}
+
+#[test]
+fn several_component_licenses_all_apply() {
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"id": "EPL-1.0"}},
+            {"expression": "MIT OR Apache-2.0"},
+        ])),
+        [
+            "EPL-1.0 AND (MIT OR Apache-2.0)",
+            "EPL-1.0 AND (MIT OR Apache-2.0)",
+            "sbom"
+        ]
+    );
+}
+
+#[test]
+fn component_license_with_only_a_url_is_unresolved() {
+    let licenses = serde_json::json!([
+        {"license": {"id": "MIT"}},
+        {"license": {"url": "https://www.eclipse.org/legal/epl-v10.html"}},
+    ]);
+    assert_eq!(
+        junit_license(licenses.clone()),
+        [
+            licenses.to_string().into(),
+            serde_json::Value::Null,
+            "sbom".into()
+        ]
+    );
+}
+
+#[test]
+fn maven_component_without_a_license_is_unresolved_without_a_registry_request() {
+    let project = maven_project(|bom| {
+        let components = bom["components"].as_array_mut().unwrap();
+        let junit = components
+            .iter_mut()
+            .find(|c| c["name"] == "junit")
+            .unwrap();
+        junit.as_object_mut().unwrap().remove("licenses");
+    });
+    project.check().code(1).stdout(predicate::str::contains(
+        "DENY    (unresolved)    junit:junit@4.13.2  via app > junit:junit\n",
+    ));
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+}
+
 /// The SBOM of the `npm-sbom` fixture.
 fn npm_sbom() -> String {
     fs::read_to_string(
