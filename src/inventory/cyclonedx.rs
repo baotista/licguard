@@ -12,6 +12,7 @@ use serde::Deserialize;
 use super::purl::Purl;
 use super::{LicenseOrigin, LicensedPackage, Package, Scope, paths};
 use crate::ecosystem::Ecosystem;
+use crate::warning::Warning;
 
 /// Whether a file named `file_name` is read as a CycloneDX JSON SBOM:
 /// `bom.json` or `*.cdx.json`, the names CycloneDX recommends.
@@ -90,8 +91,9 @@ struct Dependency {
 /// Reads the SBOM at `source`, relative to `project`, and returns its
 /// Packages with the Declared license of their component. Each Package
 /// also gets its shortest Introduction path from the SBOM's root component,
-/// following its `dependencies`, when it is reachable from it.
-pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
+/// following its `dependencies`, when it is reachable from it. Also returns
+/// a Warning for each component that is no Package licguard supports.
+pub fn inventory(project: &Path, source: &str) -> Result<(Vec<LicensedPackage>, Vec<Warning>)> {
     let path = project.join(source);
     let text =
         fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
@@ -151,16 +153,28 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
     let lines = value_lines(&text);
 
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
+    let mut warnings = Vec::new();
     for component in components {
         if component.bom_ref.is_some() && component.bom_ref == root_ref {
             continue; // the root, listed again
         }
-        let Some((package, from_registry)) = package(component) else {
-            continue;
-        };
         let line = [("bom-ref", &component.bom_ref), ("purl", &component.purl)]
             .into_iter()
             .find_map(|(key, value)| lines.get(&(key, value.clone()?)).copied());
+        let Some((package, from_registry)) = package(component) else {
+            // Named by its `bom-ref`, which identifies it in the SBOM.
+            let (name, version) = match &component.bom_ref {
+                Some(bom_ref) => (bom_ref.clone(), None),
+                None => (component.name.clone(), component.version.clone()),
+            };
+            warnings.push(Warning::UnsupportedComponent {
+                component: name,
+                version,
+                source: source.to_string(),
+                line,
+            });
+            continue;
+        };
         let declared_license = declared_license(&component.licenses);
         let found = LicensedPackage {
             license_origin: declared_license.as_ref().map(|_| LicenseOrigin::Sbom),
@@ -184,7 +198,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             Entry::Occupied(mut occupied) => occupied.get_mut().merge(found, true),
         }
     }
-    Ok(packages.into_values().collect())
+    Ok((packages.into_values().collect(), warnings))
 }
 
 impl Component {

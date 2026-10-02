@@ -3420,6 +3420,97 @@ fn npm_component_whose_purl_names_another_location_is_not_from_the_registry() {
     }
 }
 
+/// `maven-basic` with a PyPI component, depended on by `slf4j-api`, and a
+/// component without a purl or `bom-ref`.
+fn maven_project_with_unsupported_components() -> Project {
+    maven_project(|bom| {
+        let components = bom["components"].as_array_mut().unwrap();
+        components.push(serde_json::json!({
+            "type": "library",
+            "bom-ref": "pkg:pypi/requests@2.31.0",
+            "name": "requests",
+            "version": "2.31.0",
+            "purl": "pkg:pypi/requests@2.31.0",
+        }));
+        components.push(serde_json::json!({
+            "type": "file",
+            "name": "vendor.jar",
+            "version": "1.0",
+        }));
+        let slf4j = bom["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|d| d["ref"] == "pkg:maven/org.slf4j/slf4j-api@2.0.13?type=jar")
+            .unwrap();
+        slf4j["dependsOn"] = serde_json::json!(["pkg:pypi/requests@2.31.0"]);
+    })
+}
+
+#[test]
+fn component_of_an_unsupported_ecosystem_is_a_warning_that_does_not_fail_the_gate() {
+    maven_project_with_unsupported_components()
+        .check()
+        .success()
+        .stdout(predicate::str::contains("5 packages (maven)"))
+        .stdout(predicate::str::contains(
+            "\n\nwarning: component pkg:pypi/requests@2.31.0 in target/bom.json is not checked: it has no npm or maven purl\n\
+             warning: component vendor.jar@1.0 in target/bom.json is not checked: it has no npm or maven purl\n\n",
+        ));
+}
+
+#[test]
+fn check_json_reports_unsupported_components_with_their_sbom() {
+    let json = stdout_json(
+        maven_project_with_unsupported_components()
+            .check_with(&["--format", "json"])
+            .success(),
+    );
+    assert_eq!(
+        json["warnings"],
+        serde_json::json!([
+            {
+                "kind": "unsupported_component",
+                "message": "component pkg:pypi/requests@2.31.0 in target/bom.json is not checked: it has no npm or maven purl",
+                "package": "pkg:pypi/requests@2.31.0",
+                "version": null,
+                "source": "target/bom.json",
+            },
+            {
+                "kind": "unsupported_component",
+                "message": "component vendor.jar@1.0 in target/bom.json is not checked: it has no npm or maven purl",
+                "package": "vendor.jar",
+                "version": "1.0",
+                "source": "target/bom.json",
+            },
+        ])
+    );
+}
+
+#[test]
+fn introduction_path_goes_through_unsupported_components_by_their_name() {
+    let slf4j = "pkg:maven/org.slf4j/slf4j-api@2.0.13?type=jar";
+    maven_project(|bom| {
+        bom["components"].as_array_mut().unwrap().push(serde_json::json!({
+            "type": "library",
+            "bom-ref": "requests",
+            "name": "requests",
+            "version": "2.31.0",
+            "purl": "pkg:pypi/requests@2.31.0",
+        }));
+        let dependencies = bom["dependencies"].as_array_mut().unwrap();
+        let root = dependencies[0]["dependsOn"].as_array_mut().unwrap();
+        root.retain(|r| r != slf4j);
+        root.push("requests".into());
+        dependencies.push(serde_json::json!({"ref": "requests", "dependsOn": [slf4j]}));
+    })
+    .list_with(&[])
+    .success()
+    .stdout(predicate::str::contains(
+        "org.slf4j:slf4j-api@2.0.13               listed  sbom  via app > requests > org.slf4j:slf4j-api\n",
+    ));
+}
+
 /// The SBOM of the `npm-sbom` fixture.
 fn npm_sbom() -> String {
     fs::read_to_string(
@@ -4494,6 +4585,21 @@ fn check_github_annotates_a_violation_of_an_sbom_on_its_component() {
         .stdout(predicate::str::starts_with(format!(
             "::error file=target/bom.json,line={line},title=licguard%3A DENY EPL-1.0 junit%3Ajunit@4.13.2::EPL-1.0\n"
         )));
+}
+
+#[test]
+fn check_github_annotates_an_unsupported_component_on_its_sbom() {
+    let project = in_github_workspace(maven_project_with_unsupported_components());
+    let line = line_starting_with(
+        &project,
+        MAVEN_SBOM,
+        r#""bom-ref": "pkg:pypi/requests@2.31.0""#,
+    );
+    check_github(&project, &[]).success().stdout(format!(
+        "::warning file=target/bom.json,line={line},title=licguard%3A unsupported_component::component pkg:pypi/requests@2.31.0 in target/bom.json is not checked: it has no npm or maven purl\n\
+         ::warning file=target/bom.json,title=licguard%3A unsupported_component::component vendor.jar@1.0 in target/bom.json is not checked: it has no npm or maven purl\n\
+         0 deny · 1 review · 4 allow — ✓ Policy respected\n",
+    ));
 }
 
 /// The 1-based number of the first line of the Project's `file` that starts

@@ -12,6 +12,7 @@ use anyhow::{Result, anyhow};
 
 use crate::evaluation::{Evaluated, Evaluation};
 use crate::report;
+use crate::warning::Warning;
 
 /// Renders one `::error` command per Violation, on the entry of its Package
 /// in the first of its Inventory sources, one `::warning` command per
@@ -37,10 +38,17 @@ pub fn check(evaluation: &Evaluation, project: &Path, strict: bool, violated: bo
         command(&mut out, "error", &properties, &message);
     }
     for warning in &evaluation.warnings {
-        let properties = [
-            ("file", annotation_path(&project.join("licguard.toml"))),
-            ("title", format!("licguard: {}", warning.kind())),
-        ];
+        let mut properties = match warning {
+            Warning::UnsupportedComponent { source, line, .. } => {
+                let mut properties = vec![("file", annotation_path(&project.join(source)))];
+                if let Some(line) = line {
+                    properties.push(("line", line.to_string()));
+                }
+                properties
+            }
+            _ => vec![("file", annotation_path(&project.join("licguard.toml")))],
+        };
+        properties.push(("title", format!("licguard: {}", warning.kind())));
         command(&mut out, "warning", &properties, &warning.to_string());
     }
     writeln!(

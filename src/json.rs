@@ -55,7 +55,8 @@ pub fn check(evaluation: &Evaluation, strict: bool, violated: bool) -> String {
 }
 
 /// A Warning: its kind, its text as in the terminal report, the Package it
-/// is about and, for a Waiver, its expiry date and the days left.
+/// is about, for a Waiver, its expiry date and the days left and, for an
+/// SBOM component, the SBOM.
 #[derive(Serialize)]
 struct WarningJson<'a> {
     kind: &'static str,
@@ -66,6 +67,8 @@ struct WarningJson<'a> {
     expires: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     days: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source: Option<&'a str>,
 }
 
 impl<'a> From<&'a Warning> for WarningJson<'a> {
@@ -80,6 +83,7 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
                 version: version.as_deref(),
                 expires: None,
                 days: None,
+                source: None,
             },
             Warning::UnmatchedWaiver {
                 package,
@@ -92,6 +96,7 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
                 version: version.as_deref(),
                 expires: Some(expires.to_string()),
                 days: None,
+                source: None,
             },
             Warning::ExpiredWaiver {
                 package,
@@ -104,6 +109,7 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
                 version: version.as_deref(),
                 expires: Some(expires.to_string()),
                 days: None,
+                source: None,
             },
             Warning::ExpiringWaiver {
                 package,
@@ -117,6 +123,21 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
                 version: version.as_deref(),
                 expires: Some(expires.to_string()),
                 days: Some(*days),
+                source: None,
+            },
+            Warning::UnsupportedComponent {
+                component,
+                version,
+                source,
+                ..
+            } => WarningJson {
+                kind,
+                message,
+                package: component,
+                version: version.as_deref(),
+                expires: None,
+                days: None,
+                source: Some(source),
             },
         }
     }

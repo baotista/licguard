@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use crate::ecosystem::Ecosystem;
+use crate::warning::Warning;
 
 mod cyclonedx;
 pub mod npm;
@@ -19,6 +20,9 @@ pub struct Inventory {
     /// Paths relative to the Project root, joined with `/`, sorted.
     pub sources: Vec<String>,
     pub packages: Vec<LicensedPackage>,
+    /// What the Inventory sources hold that is no Package licguard
+    /// supports, in source order.
+    pub warnings: Vec<Warning>,
 }
 
 /// Reads every Inventory source of the Project, in sorted order, and returns
@@ -26,9 +30,14 @@ pub struct Inventory {
 pub fn inventory(project: &Path) -> Result<Inventory> {
     let sources = sources(project)?;
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
+    let mut warnings = Vec::new();
     for source in &sources {
         let found = match source.rsplit('/').next() {
-            Some(name) if cyclonedx::is_sbom(name) => cyclonedx::inventory(project, source)?,
+            Some(name) if cyclonedx::is_sbom(name) => {
+                let (found, unsupported) = cyclonedx::inventory(project, source)?;
+                warnings.extend(unsupported);
+                found
+            }
             Some(yarn::LOCKFILE) => yarn::inventory(project, source)?,
             Some(pnpm::LOCKFILE) => pnpm::inventory(project, source)?,
             _ => npm::inventory(project, source)?,
@@ -45,6 +54,7 @@ pub fn inventory(project: &Path) -> Result<Inventory> {
     Ok(Inventory {
         sources,
         packages: packages.into_values().collect(),
+        warnings,
     })
 }
 

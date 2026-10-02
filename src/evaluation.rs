@@ -105,6 +105,7 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
             version: c.version.clone(),
         })
         .collect();
+    warnings.append(&mut inventory.warnings);
     // The Normalized license of every Package, before `dev` filtering.
     let licensed: Vec<_> = inventory
         .packages
