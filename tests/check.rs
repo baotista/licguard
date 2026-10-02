@@ -26,6 +26,13 @@ struct Project {
     /// set otherwise: empty at first, so that no test depends on another or
     /// writes to the developer's cache.
     cache: TempDir,
+    /// The home directory of the commands, and the directory of their user
+    /// `.npmrc`, [`Project::user_npmrc`]: empty at first, so that no test
+    /// reads the developer's npm configuration, its registry or its tokens.
+    home: TempDir,
+    /// The proxy of every request to a host other than `127.0.0.1`, so that
+    /// none reaches the network: it records them, and answers `404`.
+    proxy: Registry,
 }
 
 /// The date `LICGUARD_TODAY` pins by default, so that no test depends on the
@@ -44,7 +51,20 @@ impl Project {
             env: Vec::new(),
             registry: Registry::start(),
             cache: TempDir::new().unwrap(),
+            home: TempDir::new().unwrap(),
+            proxy: Registry::start(),
         }
+    }
+
+    /// The user `.npmrc` that `NPM_CONFIG_USERCONFIG` names for the commands.
+    fn user_npmrc(&self) -> PathBuf {
+        self.home.path().join("userconfig")
+    }
+
+    /// Writes the user `.npmrc`.
+    fn with_user_npmrc(self, contents: &str) -> Self {
+        fs::write(self.user_npmrc(), contents).unwrap();
+        self
     }
 
     fn path(&self) -> PathBuf {
@@ -184,10 +204,28 @@ impl Project {
             .env("LICGUARD_TODAY", TODAY)
             .env("LICGUARD_NPM_REGISTRY", &self.registry.url)
             .env("LICGUARD_CACHE_DIR", self.cache.path());
-        // The registry is local: a proxy of the machine must not serve it.
-        for proxy in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY"] {
+        // The registry is local: a proxy of the machine must not serve it,
+        // and any other host goes to the Project's proxy.
+        for proxy in ["ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY"] {
             cmd.env_remove(proxy).env_remove(proxy.to_lowercase());
         }
+        cmd.env("HTTPS_PROXY", &self.proxy.url)
+            .env("NO_PROXY", "127.0.0.1");
+        // Nor may the developer's npm configuration, its registry or its
+        // tokens: no `npm_config_*` variable, e.g. from `npm run`, and the
+        // home directory and user `.npmrc` of the test's.
+        for (key, _) in std::env::vars_os() {
+            if key
+                .to_string_lossy()
+                .to_lowercase()
+                .starts_with("npm_config_")
+            {
+                cmd.env_remove(key);
+            }
+        }
+        cmd.env("HOME", self.home.path())
+            .env("USERPROFILE", self.home.path())
+            .env("NPM_CONFIG_USERCONFIG", self.user_npmrc());
         for (key, value) in &self.env {
             match value {
                 Some(value) => cmd.env(key, value),
@@ -248,7 +286,8 @@ impl Registry {
 
     /// Answers the requests for `path` with `responses`, `(status, body)`
     /// pairs, in order, repeating the last one. Status `0` closes the
-    /// connection without an answer.
+    /// connection without an answer; a `3xx` redirects to the URL its body
+    /// names.
     fn respond(&self, path: &str, responses: &[(u16, &str)]) {
         let responses = responses
             .iter()
@@ -281,6 +320,30 @@ impl Registry {
     /// The most requests ever handled at the same time.
     fn max_in_flight(&self) -> usize {
         self.state.max_in_flight.load(Ordering::SeqCst)
+    }
+
+    /// The registry's URL as an `.npmrc` credential key names it, without
+    /// its scheme: `//127.0.0.1:<port>/`.
+    fn nerf_dart(&self) -> String {
+        format!("{}/", &self.url["http:".len()..])
+    }
+
+    /// The `Authorization` header of each request, by path, sorted.
+    fn authorizations(&self) -> Vec<(String, Option<String>)> {
+        let mut authorizations: Vec<_> = self
+            .requests()
+            .into_iter()
+            .map(|request| {
+                let authorization = request
+                    .headers
+                    .into_iter()
+                    .find(|(name, _)| name == "authorization")
+                    .map(|(_, value)| value);
+                (request.path, authorization)
+            })
+            .collect();
+        authorizations.sort();
+        authorizations
     }
 }
 
@@ -322,8 +385,13 @@ impl RegistryState {
         if status == 0 {
             return; // closes the connection without an answer
         }
+        // A redirect's body is its location.
+        let (location, body) = match status {
+            300..=399 => (format!("location: {body}\r\n"), String::new()),
+            _ => (String::new(), body),
+        };
         let response = format!(
-            "HTTP/1.1 {status} Canned\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            "HTTP/1.1 {status} Canned\r\ncontent-type: application/json\r\n{location}content-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
         let _ = (&stream).write_all(response.as_bytes());
@@ -4896,7 +4964,9 @@ fn help_documents_the_registry_override_and_offline() {
             .assert()
             .success()
             .stdout(predicate::str::contains("--offline"))
-            .stdout(predicate::str::contains("LICGUARD_NPM_REGISTRY=URL"));
+            .stdout(predicate::str::contains("LICGUARD_NPM_REGISTRY=URL"))
+            .stdout(predicate::str::contains("@scope:registry"))
+            .stdout(predicate::str::contains(":_authToken"));
     }
 }
 
@@ -4915,6 +4985,337 @@ fn registry_override_that_is_not_an_http_url_is_a_runtime_error() {
             .stderr(predicate::str::contains("hint: "));
         project.check_with(&["--offline"]).success();
     }
+}
+
+/// `project_with_ms_on_the_registry` without `LICGUARD_NPM_REGISTRY`: the
+/// npm configuration names the registries.
+fn project_configured_by_npmrc() -> Project {
+    project_with_ms_on_the_registry().without_env("LICGUARD_NPM_REGISTRY")
+}
+
+#[test]
+fn project_npmrc_names_the_registry() {
+    let project = project_configured_by_npmrc();
+    let npmrc = format!("registry={}/\n", project.registry.url);
+    let project = project.write(".npmrc", &npmrc);
+    assert_eq!(listed_ms(&project, &[])["license"], "MIT");
+    assert_eq!(
+        project.registry.paths(),
+        ["/@types%2Fms/0.7.34", "/ms/2.1.3"]
+    );
+}
+
+/// A mock registry that declares `license` for `ms@2.1.3`.
+fn registry_with_ms(license: &str) -> Registry {
+    let registry = Registry::start();
+    registry.respond(
+        "/ms/2.1.3",
+        &[(200, &format!(r#"{{"license":"{license}"}}"#))],
+    );
+    registry
+}
+
+#[test]
+fn user_npmrc_names_the_registry_unless_the_project_npmrc_does() {
+    let user = registry_with_ms("ISC");
+    let project =
+        project_configured_by_npmrc().with_user_npmrc(&format!("registry={}\n", user.url));
+    assert_eq!(listed_ms(&project, &[])["license"], "ISC");
+    assert_eq!(user.paths(), ["/@types%2Fms/0.7.34", "/ms/2.1.3"]);
+    let npmrc = format!("registry={}\n", project.registry.url);
+    let project = project.write(".npmrc", &npmrc);
+    assert_eq!(listed_ms(&project, &[])["license"], "MIT");
+    assert_eq!(user.paths().len(), 2);
+}
+
+#[test]
+fn npm_config_registry_beats_the_project_npmrc() {
+    let project = project_configured_by_npmrc();
+    let npmrc = format!("registry={}\n", project.registry.url);
+    let env = registry_with_ms("ISC");
+    let project = project
+        .write(".npmrc", &npmrc)
+        .with_env("npm_config_registry", &env.url);
+    assert_eq!(listed_ms(&project, &[])["license"], "ISC");
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+}
+
+#[test]
+fn licguard_npm_registry_beats_npm_config_registry() {
+    let env = registry_with_ms("ISC");
+    let project = project_with_ms_on_the_registry().with_env("npm_config_registry", &env.url);
+    assert_eq!(listed_ms(&project, &[])["license"], "MIT");
+    assert_eq!(env.paths(), Vec::<String>::new());
+}
+
+#[test]
+fn user_npmrc_defaults_to_the_home_directory() {
+    let user = registry_with_ms("ISC");
+    let project = project_configured_by_npmrc().without_env("NPM_CONFIG_USERCONFIG");
+    let npmrc = format!("registry={}\n", user.url);
+    let project = project.write("home/.npmrc", &npmrc);
+    let home = project.path().join("home");
+    let project = project.with_env("HOME", home.to_str().unwrap());
+    assert_eq!(listed_ms(&project, &[])["license"], "ISC");
+}
+
+#[test]
+fn scoped_registry_serves_only_its_scope() {
+    let project = project_configured_by_npmrc();
+    let scoped = Registry::start();
+    scoped.respond("/@types%2Fms/0.7.34", &[(200, r#"{"license":"ISC"}"#)]);
+    let npmrc = format!(
+        "registry={}\n@types:registry={}/\n@other:registry=http://127.0.0.1:1\n",
+        project.registry.url, scoped.url
+    );
+    let project = project.write(".npmrc", &npmrc);
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    assert_eq!(
+        json_package(&json["packages"], "ms", "2.1.3")["license"],
+        "MIT"
+    );
+    let types = json_package(&json["packages"], "@types/ms", "0.7.34");
+    assert_eq!(types["license"], "ISC");
+    assert_eq!(types["origin"], "registry");
+    assert_eq!(project.registry.paths(), ["/ms/2.1.3"]);
+    assert_eq!(scoped.paths(), ["/@types%2Fms/0.7.34"]);
+    // LICGUARD_NPM_REGISTRY overrides every registry, scoped ones included.
+    let url = project.registry.url.clone();
+    let project = project.with_env("LICGUARD_NPM_REGISTRY", &url);
+    project.check().code(predicate::ne(2));
+    assert_eq!(scoped.paths().len(), 1);
+    assert_eq!(
+        project.registry.paths(),
+        ["/@types%2Fms/0.7.34", "/ms/2.1.3"]
+    );
+}
+
+/// A token no output, error or cache file may ever show.
+const TOKEN: &str = "npm_Secr3tT0kenForLicguardTests";
+
+/// `project_configured_by_npmrc` with `@types` Packages on a second
+/// registry, returned too, and the Project `.npmrc` that says so followed by
+/// `credentials`, where `{default}` and `{scoped}` stand for the
+/// registries' credential keys.
+fn project_with_a_scoped_registry(credentials: &str) -> (Project, Registry) {
+    let project = project_configured_by_npmrc();
+    let scoped = Registry::start();
+    scoped.respond("/@types%2Fms/0.7.34", &[(200, r#"{"license":"ISC"}"#)]);
+    let npmrc = format!(
+        "registry={}\n@types:registry={}\n{}",
+        project.registry.url,
+        scoped.url,
+        credentials
+            .replace("{default}", &project.registry.nerf_dart())
+            .replace("{scoped}", &scoped.nerf_dart())
+    );
+    (project.write(".npmrc", &npmrc), scoped)
+}
+
+#[test]
+fn auth_token_is_sent_only_to_the_registry_it_is_configured_for() {
+    let (project, scoped) = project_with_a_scoped_registry(&format!(
+        "{{scoped}}:_authToken={TOKEN}\n{{default}}other/:_authToken=not-for-this-path\n"
+    ));
+    project.check().code(1);
+    assert_eq!(
+        scoped.authorizations(),
+        [(
+            "/@types%2Fms/0.7.34".to_string(),
+            Some(format!("Bearer {TOKEN}"))
+        )]
+    );
+    assert_eq!(
+        project.registry.authorizations(),
+        [("/ms/2.1.3".to_string(), None)]
+    );
+}
+
+#[test]
+fn auth_is_sent_as_basic_authentication() {
+    // `user:pass` in base64.
+    let (project, scoped) = project_with_a_scoped_registry("{default}:_auth=dXNlcjpwYXNz\n");
+    project.check().code(1);
+    assert_eq!(
+        project.registry.authorizations(),
+        [(
+            "/ms/2.1.3".to_string(),
+            Some("Basic dXNlcjpwYXNz".to_string())
+        )]
+    );
+    assert_eq!(
+        scoped.authorizations(),
+        [("/@types%2Fms/0.7.34".to_string(), None)]
+    );
+}
+
+#[test]
+fn redirect_to_another_host_does_not_carry_the_token() {
+    let (project, scoped) =
+        project_with_a_scoped_registry(&format!("{{scoped}}:_authToken={TOKEN}\n"));
+    // The same IP address on another port: another host for npm.
+    let other = Registry::start();
+    other.respond("/@types%2Fms/0.7.34", &[(200, r#"{"license":"ISC"}"#)]);
+    let location = format!("{}/@types%2Fms/0.7.34", other.url);
+    scoped.respond("/@types%2Fms/0.7.34", &[(302, &location)]);
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    let types = json_package(&json["packages"], "@types/ms", "0.7.34");
+    assert_eq!(types["license"], "ISC");
+    assert_eq!(
+        scoped.authorizations(),
+        [(
+            "/@types%2Fms/0.7.34".to_string(),
+            Some(format!("Bearer {TOKEN}"))
+        )]
+    );
+    assert_eq!(
+        other.authorizations(),
+        [("/@types%2Fms/0.7.34".to_string(), None)]
+    );
+}
+
+#[test]
+fn npmrc_has_comments_spaces_and_quotes_as_npm_reads_them() {
+    let project = project_configured_by_npmrc();
+    let scoped = Registry::start();
+    scoped.respond("/@types%2Fms/0.7.34", &[(200, r#"{"license":"ISC"}"#)]);
+    let npmrc = format!(
+        "; registry=http://127.0.0.1:1\n  # registry=http://127.0.0.1:1\nregistry = \"{}\" \n@types:registry\t=\t'{}'\n{}:_authToken = {TOKEN} # the token\n",
+        project.registry.url,
+        scoped.url,
+        scoped.nerf_dart()
+    );
+    let project = project.write(".npmrc", &npmrc);
+    project.check().code(1).stderr("");
+    assert_eq!(project.registry.paths(), ["/ms/2.1.3"]);
+    assert_eq!(
+        scoped.authorizations(),
+        [(
+            "/@types%2Fms/0.7.34".to_string(),
+            Some(format!("Bearer {TOKEN}"))
+        )]
+    );
+}
+
+#[test]
+fn username_and_password_are_unsupported_with_a_hint_to_use_a_token() {
+    let (project, scoped) =
+        project_with_a_scoped_registry("{scoped}:username=someone\n{scoped}:_password=c2VjcmV0\n");
+    project
+        .check()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "warning: {}: `{nerf_dart}:username` and `_password` are not supported: the requests to that registry carry no credential\nhint: set `{nerf_dart}:_authToken` instead",
+            project.path().join(".npmrc").display(),
+            nerf_dart = scoped.nerf_dart()
+        )))
+        .stderr(predicate::str::contains("c2VjcmV0").not());
+    assert_eq!(
+        scoped.authorizations(),
+        [("/@types%2Fms/0.7.34".to_string(), None)]
+    );
+}
+
+#[test]
+fn token_never_appears_in_any_output_nor_in_the_cache() {
+    let (project, scoped) = project_with_a_scoped_registry(&format!(
+        "{{default}}:_authToken={TOKEN}\n{{scoped}}:_auth={TOKEN}\n"
+    ));
+    let summary = project.path().join("summary.md");
+    let project = project.with_env("GITHUB_STEP_SUMMARY", summary.to_str().unwrap());
+    let mut runs = vec![
+        project.check_with(&["--timings"]).code(1),
+        project.check_with(&["--format", "json"]).code(1),
+        project.check_with(&["--format", "github"]).code(1),
+        project
+            .list_with(&["--format", "json", "--refresh"])
+            .success(),
+        project.list_with(&["--offline"]).success(),
+    ];
+    // A registry that refuses the credential is a runtime error.
+    scoped.respond("/@types%2Fms/0.7.34", &[(401, r#"{"error":"bad token"}"#)]);
+    runs.push(project.check_with(&["--refresh"]).code(2));
+    for run in &runs {
+        let output = run.get_output();
+        for stream in [&output.stdout, &output.stderr] {
+            assert!(
+                !String::from_utf8_lossy(stream).contains(TOKEN),
+                "{output:?}"
+            );
+        }
+    }
+    assert!(!fs::read_to_string(&summary).unwrap().contains(TOKEN));
+    let files = files_under(project.cache.path());
+    assert!(files.len() >= 2, "{files:?}");
+    for file in files {
+        assert!(!file.contains(TOKEN), "{file}");
+        let contents = fs::read_to_string(project.cache.path().join(&file)).unwrap();
+        assert!(!contents.contains(TOKEN), "{file}: {contents}");
+    }
+}
+
+#[test]
+fn unreadable_npmrc_is_ignored_with_a_warning() {
+    let project = project_with_ms_on_the_registry().write(".npmrc/not-a-file", "");
+    project
+        .check()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "warning: cannot read {}: ",
+            project.path().join(".npmrc").display()
+        )));
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+}
+
+#[test]
+fn npmrc_expands_environment_variables() {
+    let (project, scoped) = project_with_a_scoped_registry("{scoped}:_authToken=${NPM_TOKEN}\n");
+    let project = project.with_env("NPM_TOKEN", TOKEN);
+    project.check().code(1).stderr("");
+    assert_eq!(
+        scoped.authorizations(),
+        [(
+            "/@types%2Fms/0.7.34".to_string(),
+            Some(format!("Bearer {TOKEN}"))
+        )]
+    );
+}
+
+#[test]
+fn undefined_variable_in_npmrc_expands_to_nothing_with_a_warning() {
+    let (project, scoped) = project_with_a_scoped_registry("{scoped}:_authToken=${NPM_TOKEN}\n");
+    let project = project.without_env("NPM_TOKEN");
+    let npmrc = project.path().join(".npmrc");
+    project
+        .check()
+        .code(1)
+        .stderr(predicate::str::contains(format!(
+            "warning: {}: ${{NPM_TOKEN}} is not set, it expands to an empty string",
+            npmrc.display()
+        )));
+    assert_eq!(
+        scoped.authorizations(),
+        [("/@types%2Fms/0.7.34".to_string(), None)]
+    );
+}
+
+#[test]
+fn without_configuration_the_registry_is_npmjs_org() {
+    let project = project_configured_by_npmrc();
+    project.check().code(2).stderr(predicate::str::contains(
+        "from the npm registry https://registry.npmjs.org: ",
+    ));
+    // Through the Project's proxy, which keeps it off the network.
+    assert!(
+        project
+            .proxy
+            .paths()
+            .iter()
+            .all(|path| path == "registry.npmjs.org:443"),
+        "{:?}",
+        project.proxy.paths()
+    );
+    assert!(!project.proxy.paths().is_empty());
 }
 
 /// Where a dependency that is not from an npm registry comes from: a git

@@ -2,6 +2,7 @@
 //! disagree: inventory, `dev` filtering, License clarifications, Policy and
 //! Warnings.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -11,6 +12,7 @@ use crate::date::Date;
 use crate::inventory::{
     self, Ecosystem, Inventory, LicenseOrigin, LicensedPackage, Package, Scope,
 };
+use crate::npmrc::{Credentials, Registries};
 use crate::policy::{Policy, Reason, Verdict};
 use crate::registry::Answer;
 use crate::warning::Warning;
@@ -95,7 +97,7 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
     let today = Date::today()?;
     let include_dev = include_dev || policy.include_dev;
     let mut inventory = inventory::inventory(project)?;
-    let requests = fetch_licenses(&mut inventory, &policy, remote)?;
+    let requests = fetch_licenses(project, &mut inventory, &policy, remote)?;
     // Matched against the whole inventory: a clarification for an
     // excluded `dev` Dependency still applies to something.
     let mut warnings: Vec<Warning> = policy
@@ -202,13 +204,18 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
 /// against the whole inventory. The registry's answers come from the cache
 /// when it has them and `remote` does not refresh it, else from the network
 /// unless `remote` is offline. Returns how many requests were sent.
-fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -> Result<usize> {
+fn fetch_licenses(
+    project: &Path,
+    inventory: &mut Inventory,
+    policy: &Policy,
+    remote: &Remote,
+) -> Result<usize> {
     // Checked even when no Package needs it, so that a wrong value is
     // reported at once.
-    let registry = if remote.offline {
+    let registries = if remote.offline {
         None
     } else {
-        Some(registry::url()?)
+        Some(Registries::load(project)?)
     };
     let missing: Vec<&mut LicensedPackage> = inventory
         .packages
@@ -225,13 +232,39 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -
         return Ok(0);
     }
     // The cache belongs to a registry, even offline.
-    let registry = match registry {
-        Some(registry) => registry,
-        None => registry::url()?,
+    let registries = match registries {
+        Some(registries) => registries,
+        None => Registries::load(project)?,
     };
-    let mut cache = Cache::open(remote.cache_dir.as_deref(), &registry);
-    let mut to_fetch = Vec::new();
+    let mut by_registry: BTreeMap<&str, Vec<&mut LicensedPackage>> = BTreeMap::new();
     for p in missing {
+        by_registry
+            .entry(registries.of(&p.package))
+            .or_default()
+            .push(p);
+    }
+    let mut requests = 0;
+    for (registry, packages) in by_registry {
+        let (result, sent) = fetch_from(registry, registries.credentials(), packages, remote);
+        requests += sent;
+        // No more requests once one has failed for good.
+        result?;
+    }
+    Ok(requests)
+}
+
+/// Takes from the npm `registry` the Declared license of each of
+/// `packages`, with `credentials`, as [`fetch_licenses`] does. Returns the first failure in
+/// Package order, if any, and how many requests were sent.
+fn fetch_from(
+    registry: &str,
+    credentials: &Credentials,
+    packages: Vec<&mut LicensedPackage>,
+    remote: &Remote,
+) -> (Result<()>, usize) {
+    let mut cache = Cache::open(remote.cache_dir.as_deref(), registry);
+    let mut to_fetch = Vec::new();
+    for p in packages {
         match cache.get(&p.package).filter(|_| !remote.refresh) {
             Some(license) => take_license(p, license.clone()),
             None if !remote.offline => to_fetch.push(p),
@@ -239,7 +272,7 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -
         }
     }
     let packages: Vec<&Package> = to_fetch.iter().map(|p| &p.package).collect();
-    let (answers, requests) = registry::answers(&registry, &packages);
+    let (answers, requests) = registry::answers(registry, credentials, &packages);
     // The first failure in Package order.
     let mut failure = None;
     for (p, answer) in to_fetch.into_iter().zip(answers) {
@@ -257,7 +290,7 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -
     }
     // Even after a failure, so that the next run need not fetch them again.
     cache.save();
-    failure.map_or(Ok(requests), Err)
+    (failure.map_or(Ok(()), Err), requests)
 }
 
 /// Gives `package` the Declared license the registry declares for it, if

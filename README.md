@@ -43,6 +43,17 @@ A fast, single-binary CLI that inventories your project's open source dependenci
 
 - **GitHub Releases**: download the archive for your platform from the [releases page](https://github.com/baotista/licguard/releases) and check it against the `.sha256` next to it. Binaries are built for Linux (x86_64 and aarch64, static musl), macOS (x86_64 and Apple silicon) and Windows (x86_64).
 
+### Private npm registries
+
+Packages whose license is in neither the lockfile nor `node_modules` get it from the npm registry. licguard finds that registry the way npm does, so a Project that installs from a private registry or a mirror needs no extra setup:
+
+1. `LICGUARD_NPM_REGISTRY`, which names the registry of every Package and overrides everything below;
+2. the `npm_config_registry` environment variable;
+3. the Project's `.npmrc`, then the user's (`NPM_CONFIG_USERCONFIG`, else `~/.npmrc`): `registry=`, and `@scope:registry=` for the Packages of a scope;
+4. else `https://registry.npmjs.org`.
+
+Global and builtin npm configuration files are not read. A credential, `//host/path/:_authToken=` or `//host/path/:_auth=`, is sent only to the URLs under the registry it names, never to another host, not even on a redirect, and never appears in the output or the license cache. `${VAR}` references are expanded from the environment, e.g. `//npm.example.com/:_authToken=${NPM_TOKEN}`. `username` and `_password` are not supported: use a token. Proxies come from `ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY`, and `NO_PROXY`.
+
 ## GitHub Action
 
 The action installs the released licguard binary, restores its license cache, and runs `licguard check --format github`: each Violation is annotated on its lockfile entry in the pull request, and a summary is added to the job. It runs on Linux, macOS and Windows runners.

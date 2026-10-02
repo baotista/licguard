@@ -46,7 +46,7 @@ struct CacheFile {
 }
 
 impl Cache {
-    /// Loads the cache of the npm `registry`, as [`crate::registry::url`]
+    /// Loads the cache of the npm `registry`, as [`crate::npmrc::Registries`]
     /// normalizes it, from `dir`, else from `LICGUARD_CACHE_DIR`, else from
     /// the user's standard cache directory.
     pub fn open(dir: Option<&Path>, registry: &str) -> Cache {
