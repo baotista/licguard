@@ -1,7 +1,6 @@
 //! The registry License origin: the Declared license the npm registry
 //! publishes for a Package's exact version.
 
-use std::env;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
@@ -10,15 +9,10 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use serde::Deserialize;
 use ureq::Agent;
+use ureq::config::RedirectAuthHeaders;
 
 use crate::inventory::{Package, npm};
-
-/// The environment variable that names another npm registry, for tests and
-/// mirrors.
-const REGISTRY: &str = "LICGUARD_NPM_REGISTRY";
-
-/// The registry queried unless [`REGISTRY`] names another.
-const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
+use crate::npmrc::Credentials;
 
 /// The longest a request may take, from connection to the end of the answer.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,7 +28,7 @@ const NETWORK_HINT: &str =
     "hint: check your network or proxy, or run with --offline to use only local License origins";
 
 /// For an answer that is neither a license nor a transient failure.
-const ANSWER_HINT: &str = "hint: check that LICGUARD_NPM_REGISTRY, if set, names a public npm registry, or run with --offline to use only local License origins";
+const ANSWER_HINT: &str = "hint: check that LICGUARD_NPM_REGISTRY, npm_config_registry or .npmrc names an npm registry and, for a private one, that .npmrc has its `_authToken`, or run with --offline to use only local License origins";
 
 /// The license fields of a registry version document.
 #[derive(Deserialize)]
@@ -52,20 +46,30 @@ pub enum Answer {
     Found(Option<String>),
 }
 
-/// Fetches the answer of the npm `registry`, as [`url`] returns it, for
-/// each of `packages`, in order: `None` for those left unrequested once a
-/// request failed for good. Also returns how many requests were sent,
-/// retries included.
-pub fn answers(registry: &str, packages: &[&Package]) -> (Vec<Option<Result<Answer>>>, usize) {
+/// Fetches the answer of the npm `registry`, as
+/// [`crate::npmrc::Registries`] names it, for each of `packages`, in order:
+/// `None` for those left unrequested once a request failed for good. Also
+/// returns how many requests were sent, retries included. A request carries
+/// the credential that `credentials` has for its URL, if any.
+pub fn answers(
+    registry: &str,
+    credentials: &Credentials,
+    packages: &[&Package],
+) -> (Vec<Option<Result<Answer>>>, usize) {
     if packages.is_empty() {
         return (Vec::new(), 0);
     }
     let agent: Agent = Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(TIMEOUT))
-        // Nothing but these and the Package's name and version (NF-07).
+        // Nothing but these, the Package's name and version, and the
+        // registry's own credential (NF-07).
         .user_agent(concat!("licguard/", env!("CARGO_PKG_VERSION")))
         .accept("application/json")
+        // A redirect never carries the credential, even to the same host:
+        // ureq's `SameHost` ignores the port and the registry's path, which
+        // scope a credential.
+        .redirect_auth_headers(RedirectAuthHeaders::Never)
         .build()
         .into();
     // Workers take the next Package from a shared index, and stop taking
@@ -83,7 +87,7 @@ pub fn answers(registry: &str, packages: &[&Package]) -> (Vec<Option<Result<Answ
                     let Some(package) = packages.get(index) else {
                         break;
                     };
-                    let result = fetch(&agent, registry, package, &sent);
+                    let result = fetch(&agent, registry, credentials, package, &sent);
                     if result.is_err() {
                         failed.store(true, Ordering::Relaxed);
                     }
@@ -95,25 +99,16 @@ pub fn answers(registry: &str, packages: &[&Package]) -> (Vec<Option<Result<Answ
     (results.into_inner().unwrap(), sent.into_inner())
 }
 
-/// The registry to query: `LICGUARD_NPM_REGISTRY` when set, else the
-/// public npm registry, without a trailing slash.
-pub fn url() -> Result<String> {
-    let Some(url) = env::var_os(REGISTRY) else {
-        return Ok(DEFAULT_REGISTRY.to_string());
-    };
-    let url = url.to_string_lossy();
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        bail!(
-            "{REGISTRY} `{url}` is not an http:// or https:// URL\nhint: set it to the URL of an npm registry, e.g. `{DEFAULT_REGISTRY}`, or unset it"
-        );
-    }
-    Ok(url.trim_end_matches('/').to_string())
-}
-
 /// Fetches the Declared license of `package`, retrying connection errors,
 /// timeouts, `429` and `5xx` answers with backoff, and counting each
 /// request in `sent`.
-fn fetch(agent: &Agent, registry: &str, package: &Package, sent: &AtomicUsize) -> Result<Answer> {
+fn fetch(
+    agent: &Agent,
+    registry: &str,
+    credentials: &Credentials,
+    package: &Package,
+    sent: &AtomicUsize,
+) -> Result<Answer> {
     let url = format!(
         "{registry}/{}/{}",
         encode(&package.name),
@@ -123,7 +118,11 @@ fn fetch(agent: &Agent, registry: &str, package: &Package, sent: &AtomicUsize) -
     let mut retries = BACKOFF.iter();
     loop {
         sent.fetch_add(1, Ordering::Relaxed);
-        let failure = match agent.get(&url).call() {
+        let mut request = agent.get(&url);
+        if let Some(authorization) = credentials.authorization(&url) {
+            request = request.header("Authorization", authorization);
+        }
+        let failure = match request.call() {
             Ok(mut response) => match response.status().as_u16() {
                 200 => match response.body_mut().read_to_string() {
                     Ok(body) => return parse(&body, registry, &what).map(Answer::Found),

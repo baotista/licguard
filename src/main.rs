@@ -7,6 +7,7 @@ mod init;
 mod inventory;
 mod json;
 mod normalize;
+mod npmrc;
 mod policy;
 mod registry;
 mod report;
@@ -37,7 +38,7 @@ struct Cli {
 /// The help text of the commands that evaluate the Project.
 const EVALUATION_HELP: &str = "Waiver expiry is evaluated as of today (local date); set LICGUARD_TODAY=YYYY-MM-DD to evaluate it as of another date, e.g. to re-run an old CI job.
 
-Packages that no local License origin declares a license for get it from the npm registry, https://registry.npmjs.org, unless --offline; set LICGUARD_NPM_REGISTRY=URL to query another one, e.g. a mirror.
+Packages that no local License origin declares a license for get it from the npm registry, unless --offline: the one npm_config_registry, else the Project's .npmrc, else the user's .npmrc (NPM_CONFIG_USERCONFIG, else ~/.npmrc) names, `@scope:registry=` for a scope's Packages, else https://registry.npmjs.org; set LICGUARD_NPM_REGISTRY=URL to query another one for every Package, e.g. a mirror. A `//host/path/:_authToken=` or `:_auth=` credential in .npmrc is sent only to the registry URLs under it.
 
 The registry's answers are kept in a license cache, one file per registry, and reused by later runs, --offline ones included; published versions never change, so they never expire (--refresh requests them again). A 404 is not cached. The cache is in the directory --cache-dir names, else in the one LICGUARD_CACHE_DIR=DIR names, else in `licguard` under the user's cache directory (~/.cache or XDG_CACHE_HOME on Linux, ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows).";
 
