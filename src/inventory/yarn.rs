@@ -101,7 +101,13 @@ enum Node {
 /// the installed copy, anywhere under the `node_modules` of the lockfile's
 /// directory or of a Workspace member (nested copies included), when its
 /// version matches.
-pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
+/// The Packages named `all_paths_of`, if any, also get every Introduction
+/// path.
+pub fn inventory(
+    project: &Path,
+    source: &str,
+    all_paths_of: Option<&str>,
+) -> Result<Vec<LicensedPackage>> {
     let path = project.join(source);
     let root = path.parent().unwrap_or(project);
     let text = fs::read_to_string(&path).map_err(|err| {
@@ -182,6 +188,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         .map(|(index, (_, name, _))| (Node::Root(index), name.clone()))
         .collect();
     let introduction_paths = paths::shortest(&root_nodes, children);
+    let dependents = all_paths_of.map(|_| paths::Graph::new(&root_nodes, children));
 
     let mut installed: HashMap<String, Vec<PathBuf>> = HashMap::new();
     for (dir, _, _) in &roots {
@@ -215,6 +222,12 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             declared_license,
             scope,
             introduction_path,
+            introduction_paths: match &dependents {
+                Some(dependents) if all_paths_of == Some(package.name.as_str()) => {
+                    dependents.paths_to(&Node::Entry(index))
+                }
+                _ => Vec::new(),
+            },
             sources: vec![source.to_string()],
             line: entry.line,
             package: package.clone(),

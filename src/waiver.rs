@@ -31,6 +31,21 @@ pub struct Waiver {
     pub expires: Date,
 }
 
+/// The Waiver that applies on `today` to `package` with Normalized license
+/// `license`: the first unexpired one that matches it, preferring one for
+/// its version.
+pub fn find<'a>(
+    waivers: &'a [Waiver],
+    package: &Package,
+    license: Option<&str>,
+    today: Date,
+) -> Option<&'a Waiver> {
+    waivers
+        .iter()
+        .filter(|w| !w.is_expired(today) && w.matches(package, license))
+        .min_by_key(|w| w.version.is_none())
+}
+
 impl Waiver {
     /// Whether the Waiver applies to `package` with Normalized license
     /// `license`; an Unresolved Package (`None`) never matches.

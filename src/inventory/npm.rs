@@ -61,7 +61,13 @@ struct InstalledManifest {
 /// entries may ship, so they are `prod`. Each Package also gets its shortest
 /// Introduction path, when it is reachable from a root: the lockfile's root
 /// entry `""`, then its Workspace members.
-pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
+/// The Packages named `all_paths_of`, if any, also get every Introduction
+/// path.
+pub fn inventory(
+    project: &Path,
+    source: &str,
+    all_paths_of: Option<&str>,
+) -> Result<Vec<LicensedPackage>> {
     let path = project.join(source);
     let root = path.parent().unwrap_or(project);
     let text =
@@ -90,9 +96,9 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             .filter(|(key, _)| is_workspace_member(key))
             .map(|(key, entry)| (key.clone(), workspace_member_name(key, entry))),
     );
-    let introduction_paths = paths::shortest(&roots, |key: &String, prod_only| {
-        children(&lockfile.packages, key, prod_only)
-    });
+    let edges = |key: &String, prod_only| children(&lockfile.packages, key, prod_only);
+    let introduction_paths = paths::shortest(&roots, edges);
+    let dependents = all_paths_of.map(|_| paths::Graph::new(&roots, edges));
     let lines = entry_lines(&text);
 
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
@@ -129,6 +135,12 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
                 .is_none_or(super::is_registry_tarball),
             scope: if entry.dev { Scope::Dev } else { Scope::Prod },
             introduction_path: introduction_paths.get(key).map(|(path, _)| path.clone()),
+            introduction_paths: match &dependents {
+                Some(dependents) if all_paths_of == Some(package.name.as_str()) => {
+                    dependents.paths_to(key)
+                }
+                _ => Vec::new(),
+            },
             sources: vec![source.to_string()],
             line: lines.get(key.as_str()).copied(),
             package: package.clone(),

@@ -168,7 +168,13 @@ enum Node {
 /// the only License origin is the installed copy in pnpm's virtual store,
 /// `node_modules/.pnpm/<name>@<version>[_<peers>]/node_modules/<name>`,
 /// next to the lockfile, when its version matches.
-pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
+/// The Packages named `all_paths_of`, if any, also get every Introduction
+/// path.
+pub fn inventory(
+    project: &Path,
+    source: &str,
+    all_paths_of: Option<&str>,
+) -> Result<Vec<LicensedPackage>> {
     let path = project.join(source);
     let root = path.parent().unwrap_or(project);
     let text = fs::read_to_string(&path).map_err(|err| {
@@ -248,6 +254,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             .collect()
     };
     let introduction_paths = paths::shortest(&roots, children);
+    let dependents = all_paths_of.map(|_| paths::Graph::new(&roots, children));
 
     let store = root.join("node_modules").join(".pnpm");
     let mut store_dirs: Vec<String> = fs::read_dir(&store)
@@ -287,6 +294,12 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             declared_license,
             scope,
             introduction_path,
+            introduction_paths: match &dependents {
+                Some(dependents) if all_paths_of == Some(package.name.as_str()) => {
+                    dependents.paths_to(&Node::Package(key.clone()))
+                }
+                _ => Vec::new(),
+            },
             sources: vec![source.to_string()],
             line: lines.get(key.as_str()).copied(),
             package: package.clone(),

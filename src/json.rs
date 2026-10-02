@@ -1,5 +1,6 @@
 //! The JSON documents of `list` and `check`, for machines. Their key order
-//! is fixed by the field order of the structs below.
+//! is fixed by the field order of the structs below. `explain` builds its
+//! own on [`PackageJson`].
 
 use serde::Serialize;
 
@@ -124,7 +125,7 @@ impl<'a> From<&'a Warning> for WarningJson<'a> {
 
 /// An evaluated Package.
 #[derive(Serialize)]
-struct PackageJson<'a> {
+pub struct PackageJson<'a> {
     ecosystem: String,
     name: &'a str,
     version: &'a str,
@@ -160,7 +161,7 @@ impl<'a> From<&'a Evaluated> for PackageJson<'a> {
 }
 
 /// Pretty-prints with 2-space indentation and a trailing newline.
-fn render(document: &impl Serialize) -> String {
+pub fn render(document: &impl Serialize) -> String {
     let mut out = serde_json::to_string_pretty(document).expect("the document serializes");
     out.push('\n');
     out

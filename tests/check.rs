@@ -162,23 +162,30 @@ impl Project {
         fs::read_to_string(self.dir.path().join("licguard.toml")).unwrap()
     }
 
-    /// Runs `licguard <command>` on the Project, with `args` after its path.
-    fn run(&self, command: &str, args: &[&str]) -> assert_cmd::assert::Assert {
-        self.run_from(Path::new("."), &self.path(), command, args)
+    /// Runs `licguard explain <package>` on the Project, with `args` after
+    /// its path.
+    fn explain_with(&self, package: &str, args: &[&str]) -> assert_cmd::assert::Assert {
+        self.run_from(Path::new("."), &self.path(), &["explain", package], args)
     }
 
-    /// Runs `licguard <command> <path>` from the directory `cwd`, with `args`
-    /// after `path`, which names the Project from `cwd`.
+    /// Runs `licguard <command>` on the Project, with `args` after its path.
+    fn run(&self, command: &str, args: &[&str]) -> assert_cmd::assert::Assert {
+        self.run_from(Path::new("."), &self.path(), &[command], args)
+    }
+
+    /// Runs `licguard <command…> <path>` from the directory `cwd`, with
+    /// `args` after `path`, which names the Project from `cwd`; `command` is
+    /// the command and its arguments that come before `path`.
     fn run_from(
         &self,
         cwd: &Path,
         path: &Path,
-        command: &str,
+        command: &[&str],
         args: &[&str],
     ) -> assert_cmd::assert::Assert {
         let mut cmd = Command::cargo_bin("licguard").unwrap();
         cmd.current_dir(cwd)
-            .arg(command)
+            .args(command)
             .arg(path)
             .args(args)
             .env("LICGUARD_TODAY", TODAY)
@@ -4169,16 +4176,16 @@ fn check_github_names_files_from_the_current_directory_or_the_github_workspace()
     // A relative Project path is kept, since GitHub Actions runs steps from
     // the workspace.
     project
-        .run_from(&dir, Path::new("."), "check", &args)
+        .run_from(&dir, Path::new("."), &["check"], &args)
         .code(1)
         .stdout(annotation("package-lock.json"));
     project
-        .run_from(parent, Path::new(name), "check", &args)
+        .run_from(parent, Path::new(name), &["check"], &args)
         .code(1)
         .stdout(annotation(&format!("{name}/package-lock.json")));
     let project = project.with_env("GITHUB_WORKSPACE", parent.to_str().unwrap());
     project
-        .run_from(&dir, Path::new("."), "check", &args)
+        .run_from(&dir, Path::new("."), &["check"], &args)
         .code(1)
         .stdout(annotation("package-lock.json"));
 
@@ -5756,4 +5763,654 @@ fn help_documents_timings() {
                 "Print how long the run took and how many registry requests it sent on stderr, as when stderr is a terminal",
             ));
     }
+}
+
+#[test]
+fn explain_shows_why_a_listed_package_got_its_verdict() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .explain_with("once", &[])
+        .success()
+        .stdout(
+            "Package:            once@1.4.0 (npm)\n\
+             Scope:              prod\n\
+             Declared license:   ISC\n\
+             Normalized license: ISC\n\
+             License origin:     installed\n\
+             Verdict:            allow\n\
+             Verdict reason:     listed\n\
+             Introduction paths: app > once\n\
+             Inventory sources:  package-lock.json\n",
+        );
+}
+
+#[test]
+fn explain_of_a_name_shows_every_version_in_order() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .explain_with("ms", &[])
+        .success()
+        .stdout(
+            "Package:            ms@2.1.2 (npm)\n\
+             Scope:              prod\n\
+             Declared license:   MIT\n\
+             Normalized license: MIT\n\
+             License origin:     installed\n\
+             Verdict:            allow\n\
+             Verdict reason:     listed\n\
+             Introduction paths: app > debug > ms\n\
+             Inventory sources:  package-lock.json\n\
+             \n\
+             Package:            ms@2.1.3 (npm)\n\
+             Scope:              prod\n\
+             Declared license:   MIT\n\
+             Normalized license: MIT\n\
+             License origin:     installed\n\
+             Verdict:            allow\n\
+             Verdict reason:     listed\n\
+             Introduction paths: app > ms\n\
+             Inventory sources:  package-lock.json\n",
+        );
+}
+
+#[test]
+fn explain_of_a_name_and_version_shows_that_version_only() {
+    let stdout = Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .explain_with("ms@2.1.3", &[])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert!(stdout.starts_with("Package:            ms@2.1.3 (npm)\n"));
+    assert!(!stdout.contains("2.1.2"));
+}
+
+#[test]
+fn explain_reads_a_scoped_name_with_or_without_a_version() {
+    let project = Project::from_fixture("npm-basic").with_policy(ALLOW_ALL);
+    for query in ["@types/ms", "@types/ms@0.7.34"] {
+        project
+            .explain_with(query, &[])
+            .success()
+            .stdout(predicate::str::starts_with(
+                "Package:            @types/ms@0.7.34 (npm)\n",
+            ))
+            .stdout(predicate::str::contains(
+                "Introduction paths: app > @types/ms\n",
+            ));
+    }
+}
+
+#[test]
+fn explain_shows_an_unresolved_package_without_a_license() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .remove("node_modules/wrappy")
+        .edit_lockfile(|packages| {
+            packages["node_modules/wrappy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("license");
+        })
+        .explain_with("wrappy", &[])
+        .success()
+        .stdout(
+            "Package:            wrappy@1.0.2 (npm)\n\
+             Scope:              prod\n\
+             Declared license:   (none)\n\
+             Normalized license: (unresolved)\n\
+             License origin:     (none)\n\
+             Verdict:            deny\n\
+             Verdict reason:     unresolved\n\
+             Introduction paths: app > once > wrappy\n\
+             Inventory sources:  package-lock.json\n",
+        );
+}
+
+#[test]
+fn explain_shows_the_declared_license_of_an_unresolved_package_as_written() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .declare_ms_license("SEE LICENSE IN LICENSE.md")
+        .explain_with("ms@2.1.3", &[])
+        .success()
+        .stdout(predicate::str::contains(
+            "Declared license:   SEE LICENSE IN LICENSE.md\n\
+             Normalized license: (unresolved)\n\
+             License origin:     installed\n\
+             Verdict:            deny\n\
+             Verdict reason:     unresolved\n",
+        ));
+}
+
+#[test]
+fn explain_shows_an_unlisted_package() {
+    Project::from_fixture("npm-basic")
+        .with_policy("[policy]\nallow = [\"MIT\"]\n")
+        .explain_with("once", &[])
+        .success()
+        .stdout(predicate::str::contains(
+            "Normalized license: ISC\n\
+             License origin:     installed\n\
+             Verdict:            review\n\
+             Verdict reason:     unlisted\n",
+        ));
+}
+
+#[test]
+fn explain_shows_the_elected_license_of_an_or_expression() {
+    Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT", "ISC"]
+            review = ["MPL-2.0"]
+            deny = ["GPL-3.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL-3.0-only OR MPL-2.0")
+        .explain_with("ms@2.1.3", &[])
+        .success()
+        .stdout(predicate::str::contains(
+            "Declared license:   GPL-3.0-only OR MPL-2.0\n\
+             Normalized license: GPL-3.0-only OR MPL-2.0\n\
+             Elected license:    MPL-2.0\n\
+             License origin:     installed\n\
+             Verdict:            review\n\
+             Verdict reason:     listed\n",
+        ));
+}
+
+#[test]
+fn explain_shows_a_dev_dependency_without_include_dev() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_GPL)
+        .edit_lockfile(add_dev_dependency)
+        .explain_with("test-kit", &[])
+        .success()
+        .stdout(
+            "Package:            test-kit@1.0.0 (npm)\n\
+             Scope:              dev\n\
+             Declared license:   GPL-3.0-only\n\
+             Normalized license: GPL-3.0-only\n\
+             License origin:     lockfile\n\
+             Verdict:            deny\n\
+             Verdict reason:     listed\n\
+             Introduction paths: app > test-kit\n\
+             Inventory sources:  package-lock.json\n",
+        );
+}
+
+#[test]
+fn explain_names_the_waiver_that_applies() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}{}",
+            waiver("once", None, "ISC"),
+            waiver("once", Some("1.4.0"), "ISC").replace("ticket LEGAL-142", "ticket LEGAL-143")
+        ))
+        .explain_with("once", &[])
+        .success()
+        .stdout(
+            "Package:            once@1.4.0 (npm)\n\
+             Scope:              prod\n\
+             Declared license:   ISC\n\
+             Normalized license: ISC\n\
+             License origin:     installed\n\
+             Verdict:            allow\n\
+             Verdict reason:     waived\n\
+             Waiver:             once@1.4.0, ISC, expires 2027-01-01\n\
+             Waiver reason:      Approved by legal, ticket LEGAL-143\n\
+             Introduction paths: app > once\n\
+             Inventory sources:  package-lock.json\n",
+        );
+}
+
+#[test]
+fn explain_names_the_clarification_that_applies() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{ALLOW_ALL}{}{}",
+            clarification("ms", None, "ISC"),
+            clarification("ms", Some("2.1.3"), "MIT")
+        ))
+        .declare_ms_license("SEE LICENSE IN LICENSE.md")
+        .explain_with("ms@2.1.3", &[])
+        .success()
+        .stdout(
+            "Package:            ms@2.1.3 (npm)\n\
+             Scope:              prod\n\
+             Declared license:   SEE LICENSE IN LICENSE.md\n\
+             Normalized license: MIT\n\
+             License origin:     clarification\n\
+             Verdict:            allow\n\
+             Verdict reason:     listed\n\
+             Clarification:      ms@2.1.3, MIT\n\
+             Evidence:           https://example.com/ms/LICENSE\n\
+             Introduction paths: app > ms\n\
+             Inventory sources:  package-lock.json\n",
+        );
+}
+
+#[test]
+fn explain_shows_the_warnings_about_the_waivers_and_clarifications_of_the_package() {
+    let expired_for_another_version =
+        waiver("ms", Some("2.1.2"), "MIT").replace("2027-01-01", "2000-01-01");
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_MIT}{}{}{expired_for_another_version}{}",
+            waiver_expiring("\"2026-06-11\""),
+            waiver("ms", Some("2.1.0"), "MIT"),
+            clarification("debug", Some("1.0.0"), "MIT"),
+        ))
+        .explain_with("ms@2.1.3", &[])
+        .success()
+        .stdout(predicate::str::contains(
+            "Verdict reason:     waived\n\
+             Waiver:             ms, MIT, expires 2026-06-11\n\
+             Waiver reason:      Approved by legal\n\
+             Warning:            waiver for ms@2.1.0 matches no Package\n\
+             Warning:            waiver for ms expires in 10 days (2026-06-11)\n\
+             Introduction paths: app > ms\n",
+        ));
+}
+
+#[test]
+fn explain_shows_every_introduction_path_once_in_order() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .edit_lockfile(|packages| {
+            // `shared` is reached directly and through both `once` and `debug`.
+            packages[""]["dependencies"]["shared"] = "1".into();
+            packages["node_modules/shared"] = serde_json::json!({
+                "version": "1.0.0",
+                "license": "ISC",
+            });
+            packages["node_modules/once"]["dependencies"]["shared"] = "1".into();
+            packages["node_modules/debug"]["dependencies"]["shared"] = "1".into();
+        });
+    // A second Inventory source with the same paths.
+    let lockfile = fs::read_to_string(project.path().join("package-lock.json")).unwrap();
+    project
+        .write("tools/package-lock.json", &lockfile)
+        .explain_with("shared", &[])
+        .success()
+        .stdout(predicate::str::ends_with(
+            "Introduction paths: app > debug > shared\n                    \
+             app > once > shared\n                    \
+             app > shared\n\
+             Inventory sources:  package-lock.json, tools/package-lock.json\n",
+        ));
+}
+
+/// A `package-lock.json` whose root `app` depends on `count` Packages,
+/// `dep-00`, `dep-01`, …, that each depend on `target@1.0.0`.
+fn lockfile_with_paths_to_target(count: usize) -> String {
+    let mut packages = serde_json::json!({
+        "": { "name": "app", "version": "1.0.0", "dependencies": {} },
+        "node_modules/target": { "version": "1.0.0", "license": "MIT" },
+    });
+    for i in 0..count {
+        let name = format!("dep-{i:02}");
+        packages[""]["dependencies"][&name] = "1".into();
+        packages[format!("node_modules/{name}")] = serde_json::json!({
+            "version": "1.0.0",
+            "license": "MIT",
+            "dependencies": { "target": "1" },
+        });
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "name": "app",
+        "lockfileVersion": 3,
+        "packages": packages,
+    }))
+    .unwrap()
+}
+
+#[test]
+fn explain_shows_at_most_twenty_introduction_paths() {
+    let mut expected = String::from("Introduction paths: app > dep-00 > target\n");
+    for i in 1..20 {
+        expected += &format!("                    app > dep-{i:02} > target\n");
+    }
+    expected += "                    (+5 more)\nInventory sources:  package-lock.json\n";
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .write("package-lock.json", &lockfile_with_paths_to_target(25))
+        .explain_with("target", &[])
+        .success()
+        .stdout(predicate::str::ends_with(expected));
+}
+
+#[test]
+fn explain_shows_every_introduction_path_from_yarn_and_pnpm_lockfiles() {
+    Project::from_fixture("yarn-v1")
+        .with_policy(ALLOW_ALL)
+        .explain_with("wrappy", &[])
+        .success()
+        .stdout(predicate::str::contains(
+            "Introduction paths: app > once > wrappy\n                    \
+             ui > wrappy\n\
+             Inventory sources:  yarn.lock\n",
+        ));
+    Project::from_fixture("pnpm-v9")
+        .with_policy(ALLOW_ALL)
+        .explain_with("has-flag", &[])
+        .success()
+        .stdout(predicate::str::contains(
+            "Introduction paths: app > debug > supports-color > has-flag\n                    \
+             app > supports-color > has-flag\n                    \
+             ui > debug > supports-color > has-flag\n\
+             Inventory sources:  pnpm-lock.yaml\n",
+        ));
+}
+
+#[test]
+fn explain_stops_counting_introduction_paths_past_a_thousand() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .write("package-lock.json", &lockfile_with_paths_to_target(1005))
+        .explain_with("target", &[])
+        .success()
+        .stdout(predicate::str::contains(
+            "                    (+980 or more)\nInventory sources:  package-lock.json\n",
+        ));
+}
+
+#[test]
+fn explain_reads_an_ecosystem_prefix() {
+    let project = Project::from_fixture("npm-basic").with_policy(ALLOW_ALL);
+    for (query, package) in [
+        ("npm:ms@2.1.3", "ms@2.1.3"),
+        ("npm:@types/ms", "@types/ms@0.7.34"),
+    ] {
+        project
+            .explain_with(query, &[])
+            .success()
+            .stdout(predicate::str::starts_with(format!(
+                "Package:            {package} (npm)\n"
+            )));
+    }
+}
+
+#[test]
+fn explain_of_an_unknown_name_hints_at_close_names() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .edit_lockfile(add_dev_dependency);
+    for (query, hint) in [
+        // Within two edits, `dev` Dependencies included.
+        ("tests-kit", "test-kit"),
+        // Within two edits, or containing the query, closest first.
+        ("s", "ms, test-kit, @types/ms"),
+        ("Once", "once"),
+    ] {
+        project
+            .explain_with(query, &[])
+            .code(2)
+            .stdout("")
+            .stderr(format!(
+                "error: no Package matches `{query}`\nhint: did you mean {hint}?\n"
+            ));
+    }
+}
+
+#[test]
+fn explain_hints_at_five_close_names_at_most() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .write("package-lock.json", &lockfile_with_paths_to_target(25))
+        .explain_with("dep", &[])
+        .code(2)
+        .stderr(predicate::str::ends_with(
+            "hint: did you mean dep-00, dep-01, dep-02, dep-03, dep-04?\n",
+        ));
+}
+
+#[test]
+fn explain_of_an_unknown_version_hints_at_the_known_ones() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .explain_with("ms@9.9.9", &[])
+        .code(2)
+        .stderr("error: no Package matches `ms@9.9.9`\nhint: did you mean ms@2.1.2, ms@2.1.3?\n");
+}
+
+#[test]
+fn explain_of_a_name_close_to_none_hints_at_the_inventory() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .explain_with("left-pad", &[])
+        .code(2)
+        .stderr(
+            "error: no Package matches `left-pad`\nhint: run `licguard list --include-dev` to see the whole inventory\n",
+        );
+}
+
+#[test]
+fn explain_json_has_a_fixed_shape() {
+    Project::from_fixture("npm-basic")
+        .with_policy(&format!(
+            "{DENY_ISC}{}{}",
+            waiver("once", None, "ISC").replace("2027-01-01", "2026-06-11"),
+            clarification("once", Some("1.4.0"), "ISC"),
+        ))
+        .explain_with("once", &["--format", "json"])
+        .success()
+        .stdout(
+            r#"{
+  "packages": [
+    {
+      "ecosystem": "npm",
+      "name": "once",
+      "version": "1.4.0",
+      "scope": "prod",
+      "declared_license": "ISC",
+      "license": "ISC",
+      "elected": null,
+      "verdict": "allow",
+      "reason": "waived",
+      "origin": "clarification",
+      "introduction_path": [
+        "app",
+        "once"
+      ],
+      "sources": [
+        "package-lock.json"
+      ],
+      "introduction_paths": [
+        [
+          "app",
+          "once"
+        ]
+      ],
+      "more_introduction_paths": 0,
+      "waiver": {
+        "package": "once",
+        "version": null,
+        "license": "ISC",
+        "reason": "Approved by legal, ticket LEGAL-142",
+        "expires": "2026-06-11"
+      },
+      "clarification": {
+        "package": "once",
+        "version": "1.4.0",
+        "license": "ISC",
+        "evidence": "https://example.com/once/LICENSE"
+      },
+      "warnings": [
+        "waiver for once expires in 10 days (2026-06-11)"
+      ]
+    }
+  ]
+}
+"#,
+        );
+}
+
+#[test]
+fn explain_json_gives_unresolved_unlisted_and_elected_licenses() {
+    let project = Project::from_fixture("npm-basic")
+        .with_policy(
+            r#"
+            [policy]
+            allow = ["MIT"]
+            deny = ["GPL-3.0-only"]
+            "#,
+        )
+        .declare_ms_license("GPL-3.0-only OR MPL-2.0")
+        .remove("node_modules/wrappy")
+        .edit_lockfile(|packages| {
+            packages["node_modules/wrappy"]
+                .as_object_mut()
+                .unwrap()
+                .remove("license");
+        });
+    let explain = |query: &str| {
+        let json = stdout_json(project.explain_with(query, &["--format", "json"]).success());
+        json["packages"][0].clone()
+    };
+
+    let wrappy = explain("wrappy");
+    assert_eq!(wrappy["declared_license"], serde_json::Value::Null);
+    assert_eq!(wrappy["license"], serde_json::Value::Null);
+    assert_eq!(wrappy["origin"], serde_json::Value::Null);
+    assert_eq!(wrappy["verdict"], "deny");
+    assert_eq!(wrappy["reason"], "unresolved");
+    assert_eq!(wrappy["waiver"], serde_json::Value::Null);
+    assert_eq!(wrappy["clarification"], serde_json::Value::Null);
+    assert_eq!(wrappy["warnings"], serde_json::json!([]));
+
+    let once = explain("once");
+    assert_eq!(once["verdict"], "review");
+    assert_eq!(once["reason"], "unlisted");
+
+    let ms = explain("ms@2.1.3");
+    assert_eq!(ms["license"], "GPL-3.0-only OR MPL-2.0");
+    assert_eq!(ms["elected"], "MPL-2.0");
+    assert_eq!(ms["verdict"], "review");
+}
+
+#[test]
+fn explain_json_gives_every_version_and_at_most_twenty_introduction_paths() {
+    let json = stdout_json(
+        Project::from_fixture("npm-basic")
+            .with_policy(ALLOW_ALL)
+            .explain_with("ms", &["--format", "json"])
+            .success(),
+    );
+    let versions: Vec<&serde_json::Value> = json["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| &p["version"])
+        .collect();
+    assert_eq!(versions, ["2.1.2", "2.1.3"]);
+
+    let json = stdout_json(
+        Project::from_fixture("npm-basic")
+            .with_policy(ALLOW_ALL)
+            .write("package-lock.json", &lockfile_with_paths_to_target(25))
+            .explain_with("target", &["--format", "json"])
+            .success(),
+    );
+    let target = &json["packages"][0];
+    let paths = target["introduction_paths"].as_array().unwrap();
+    assert_eq!(paths.len(), 20);
+    assert_eq!(paths[0], serde_json::json!(["app", "dep-00", "target"]));
+    assert_eq!(paths[19], serde_json::json!(["app", "dep-19", "target"]));
+    assert_eq!(target["more_introduction_paths"], 5);
+}
+
+#[test]
+fn explain_takes_licenses_from_the_registry_unless_offline() {
+    let project = project_with_ms_on_the_registry();
+    project
+        .explain_with("ms@2.1.3", &["--offline"])
+        .success()
+        .stdout(predicate::str::contains(
+            "Declared license:   (none)\n\
+             Normalized license: (unresolved)\n\
+             License origin:     (none)\n",
+        ));
+    assert_eq!(project.registry.paths(), Vec::<String>::new());
+    project
+        .explain_with("ms@2.1.3", &[])
+        .success()
+        .stdout(predicate::str::contains(
+            "Declared license:   MIT\n\
+             Normalized license: MIT\n\
+             License origin:     registry\n",
+        ));
+    assert_eq!(requests_for(&project, "/ms/2.1.3"), 1);
+}
+
+#[test]
+fn explain_writes_to_the_output_file() {
+    let project = Project::from_fixture("npm-basic").with_policy(ALLOW_ALL);
+    let expected = project
+        .explain_with("once", &[])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let file = project.path().join("explain.txt");
+    project
+        .explain_with("once", &["--output", file.to_str().unwrap()])
+        .success()
+        .stdout("");
+    assert_eq!(fs::read(&file).unwrap(), expected);
+
+    let file = project.path().join("missing").join("explain.txt");
+    project
+        .explain_with("once", &["--output", file.to_str().unwrap()])
+        .code(2)
+        .stderr(predicate::str::contains("cannot write"))
+        .stderr(predicate::str::contains("hint:"));
+}
+
+#[test]
+fn explain_exits_0_whatever_the_verdict_and_2_on_a_runtime_error() {
+    Project::from_fixture("npm-basic")
+        .with_policy(DENY_ISC)
+        .explain_with("once", &[])
+        .success()
+        .stdout(predicate::str::contains("Verdict:            deny\n"));
+    Project::from_fixture("npm-basic")
+        .explain_with("once", &[])
+        .code(2)
+        .stdout("")
+        .stderr(predicate::str::contains("licguard.toml"));
+}
+
+#[test]
+fn explain_timings_print_the_line_on_stderr() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .explain_with("once", &["--timings"])
+        .success()
+        .stderr(predicate::str::starts_with("licguard: 6 packages in "));
+}
+
+#[test]
+fn explain_help_documents_the_query_and_the_evaluation_options() {
+    Command::cargo_bin("licguard")
+        .unwrap()
+        .args(["explain", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("<PACKAGE>"))
+        .stdout(predicate::str::contains("`name@version`"))
+        .stdout(predicate::str::contains("`npm:@types/ms@0.7.34`"))
+        .stdout(predicate::str::contains("--format <FORMAT>"))
+        .stdout(predicate::str::contains("--output <FILE>"))
+        .stdout(predicate::str::contains("--offline"))
+        .stdout(predicate::str::contains("--refresh"))
+        .stdout(predicate::str::contains("--cache-dir <DIR>"))
+        .stdout(predicate::str::contains("--timings"))
+        .stdout(predicate::str::contains("LICGUARD_TODAY=YYYY-MM-DD"))
+        .stdout(predicate::str::contains("`dev` Dependencies included"))
+        .stdout(predicate::str::contains("--include-dev").not());
 }
