@@ -19,7 +19,7 @@ A local, unpublished package that is part of the Project itself (e.g. an npm wor
 _Avoid_: Local package, sub-project
 
 **Package**:
-A published artifact identified by ecosystem, name and version (e.g. npm `lodash@4.17.21`). The unit that carries a license and receives a verdict.
+A published artifact identified by ecosystem, name and version (e.g. npm `lodash@4.17.21`, maven `org.slf4j:slf4j-api@2.0.13`, named `group:artifact`). The unit that carries a license and receives a verdict.
 _Avoid_: Library, module, component, artifact
 
 **Dependency**:
@@ -49,7 +49,7 @@ The option of an `OR` expression that the verdict is based on — the most favor
 _Avoid_: Chosen option, selected license
 
 **License origin**:
-Where a Package's license information came from: a License clarification, the installed package, the Inventory source itself (e.g. a lockfile that records licenses), or the registry. The license cache is not an origin of its own: it only keeps the registry's answers, so a cached license is still from the registry.
+Where a Package's license information came from: a License clarification, the installed package, the Inventory source itself (e.g. a lockfile that records licenses, or an SBOM), or the registry. The license cache is not an origin of its own: it only keeps the registry's answers, so a cached license is still from the registry.
 _Avoid_: License source, provenance
 
 **License clarification**:
