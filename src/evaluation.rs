@@ -14,7 +14,7 @@ use crate::inventory::{
 use crate::policy::{Policy, Reason, Verdict};
 use crate::registry::Answer;
 use crate::warning::Warning;
-use crate::{clarification, normalize, registry};
+use crate::{clarification, normalize, registry, waiver};
 
 /// The evaluated Packages of a Project.
 pub struct Evaluation {
@@ -44,6 +44,8 @@ pub struct Evaluated {
     pub elected: Option<String>,
     /// See [`inventory::LicensedPackage::introduction_path`].
     pub introduction_path: Option<Vec<String>>,
+    /// See [`inventory::LicensedPackage::introduction_paths`].
+    pub introduction_paths: Vec<Vec<String>>,
     /// See [`inventory::LicensedPackage::sources`].
     pub sources: Vec<String>,
     /// See [`inventory::LicensedPackage::line`].
@@ -91,10 +93,26 @@ pub struct Remote {
 /// Evaluates the Project at `project` against its Policy; `dev` Dependencies
 /// are included when `include_dev` or the Policy says so.
 pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Evaluation> {
+    evaluate_with(project, include_dev, remote, None)
+}
+
+/// Evaluates the Project at `project` as [`evaluate`] does, `dev`
+/// Dependencies included, and gives the Packages named `name` every
+/// Introduction path.
+pub fn evaluate_all_paths_of(project: &Path, remote: &Remote, name: &str) -> Result<Evaluation> {
+    evaluate_with(project, true, remote, Some(name))
+}
+
+fn evaluate_with(
+    project: &Path,
+    include_dev: bool,
+    remote: &Remote,
+    all_paths_of: Option<&str>,
+) -> Result<Evaluation> {
     let policy = Policy::load(project)?;
     let today = Date::today()?;
     let include_dev = include_dev || policy.include_dev;
-    let mut inventory = inventory::inventory(project)?;
+    let mut inventory = inventory::inventory(project, all_paths_of)?;
     let requests = fetch_licenses(&mut inventory, &policy, remote)?;
     // Matched against the whole inventory: a clarification for an
     // excluded `dev` Dependency still applies to something.
@@ -154,11 +172,6 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
         }
     }
     warnings.sort();
-    let waivers: Vec<_> = policy
-        .waivers
-        .iter()
-        .filter(|w| !w.is_expired(today))
-        .collect();
     let evaluated = licensed
         .into_iter()
         .filter(|(p, _, _)| include_dev || p.scope == Scope::Prod)
@@ -166,9 +179,7 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
             let mut outcome = policy.evaluate(license.as_deref());
             // A Waiver tolerates the Verdict, never changes the license.
             if outcome.verdict != Verdict::Allow
-                && waivers
-                    .iter()
-                    .any(|w| w.matches(&p.package, license.as_deref()))
+                && waiver::find(&policy.waivers, &p.package, license.as_deref(), today).is_some()
             {
                 outcome.verdict = Verdict::Allow;
                 outcome.reason = Reason::Waived;
@@ -183,6 +194,7 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
                 scope: p.scope,
                 package: p.package,
                 introduction_path: p.introduction_path,
+                introduction_paths: p.introduction_paths,
                 sources: p.sources,
                 line: p.line,
             }

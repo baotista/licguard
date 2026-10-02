@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 pub mod npm;
-mod paths;
+pub mod paths;
 pub mod pnpm;
 pub mod yarn;
 
@@ -18,15 +18,16 @@ pub struct Inventory {
 }
 
 /// Reads every Inventory source of the Project, in sorted order, and returns
-/// its Packages, each once: see [`LicensedPackage::merge`].
-pub fn inventory(project: &Path) -> Result<Inventory> {
+/// its Packages, each once: see [`LicensedPackage::merge`]. The Packages
+/// named `all_paths_of`, if any, get every Introduction path.
+pub fn inventory(project: &Path, all_paths_of: Option<&str>) -> Result<Inventory> {
     let sources = lockfiles(project)?;
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for source in &sources {
         let found = match source.rsplit('/').next() {
-            Some(yarn::LOCKFILE) => yarn::inventory(project, source)?,
-            Some(pnpm::LOCKFILE) => pnpm::inventory(project, source)?,
-            _ => npm::inventory(project, source)?,
+            Some(yarn::LOCKFILE) => yarn::inventory(project, source, all_paths_of)?,
+            Some(pnpm::LOCKFILE) => pnpm::inventory(project, source, all_paths_of)?,
+            _ => npm::inventory(project, source, all_paths_of)?,
         };
         for found in found {
             match packages.entry(found.package.clone()) {
@@ -132,6 +133,9 @@ pub struct LicensedPackage {
     /// Package names from a root (the Project root or a Workspace member) to
     /// this Package; `None` when it is not reachable from any root.
     pub introduction_path: Option<Vec<String>>,
+    /// Every Introduction path, without duplicates and sorted, up to just
+    /// past [`paths::MAX_PATHS`]; empty unless asked for.
+    pub introduction_paths: Vec<Vec<String>>,
     /// The Inventory sources the Package was found in, sorted.
     pub sources: Vec<String>,
     /// The 1-based line of the Package's entry in the first of its
@@ -148,6 +152,10 @@ impl LicensedPackage {
     /// the line follows the path.
     fn merge(&mut self, other: LicensedPackage, same_source: bool) {
         self.from_registry &= other.from_registry;
+        self.introduction_paths.extend(other.introduction_paths);
+        self.introduction_paths.sort();
+        self.introduction_paths.dedup();
+        self.introduction_paths.truncate(paths::MAX_PATHS + 1);
         for source in other.sources {
             if !self.sources.contains(&source) {
                 self.sources.push(source);

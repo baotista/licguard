@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::Hash;
 
 use super::Scope;
@@ -25,6 +25,92 @@ where
         paths.entry(key).or_insert((path, Scope::Dev));
     }
     paths
+}
+
+/// The most Introduction paths [`Graph::paths_to`] collects for a node
+/// before it stops: past this many, it only tells that there are more.
+pub const MAX_PATHS: usize = 1000;
+
+/// A dependency graph reachable from its roots, `dev` edges included, kept to
+/// find every Introduction path of a node.
+pub(super) struct Graph<K> {
+    /// The name of each root.
+    roots: HashMap<K, String>,
+    /// Each node's dependents, as `(dependent key, name of the node in the
+    /// dependent's dependencies)` pairs, in walk order.
+    parents: HashMap<K, Vec<(K, String)>>,
+}
+
+impl<K: Clone + Eq + Hash> Graph<K> {
+    /// Walks the graph from `roots`, as for [`shortest`].
+    pub(super) fn new<F>(roots: &[(K, String)], children: F) -> Self
+    where
+        F: Fn(&K, bool) -> Vec<(String, K)>,
+    {
+        let mut queue: VecDeque<K> = roots.iter().map(|(key, _)| key.clone()).collect();
+        let roots: HashMap<K, String> = roots.iter().cloned().collect();
+        let mut parents: HashMap<K, Vec<(K, String)>> = HashMap::new();
+        let mut seen: HashSet<K> = roots.keys().cloned().collect();
+        while let Some(key) = queue.pop_front() {
+            let mut next = children(&key, false);
+            next.sort_by(|(a, _), (b, _)| a.cmp(b));
+            for (name, child) in next {
+                // As for `shortest`, no path goes through a root.
+                if roots.contains_key(&child) {
+                    continue;
+                }
+                parents
+                    .entry(child.clone())
+                    .or_default()
+                    .push((key.clone(), name));
+                if seen.insert(child.clone()) {
+                    queue.push_back(child);
+                }
+            }
+        }
+        Graph { roots, parents }
+    }
+
+    /// Every Introduction path of the node at `target`, each through
+    /// distinct nodes, without duplicates and sorted; it stops past
+    /// [`MAX_PATHS`] of them.
+    pub(super) fn paths_to(&self, target: &K) -> Vec<Vec<String>> {
+        let mut found = BTreeSet::new();
+        self.collect(target, &mut Vec::new(), &mut HashSet::new(), &mut found);
+        found.into_iter().collect()
+    }
+
+    /// Adds to `found` every path from a root to `node` followed by
+    /// `suffix`, the names from `node` to the target in reverse order, that
+    /// goes through none of the nodes `on_path`.
+    fn collect(
+        &self,
+        node: &K,
+        suffix: &mut Vec<String>,
+        on_path: &mut HashSet<K>,
+        found: &mut BTreeSet<Vec<String>>,
+    ) {
+        if found.len() > MAX_PATHS {
+            return;
+        }
+        if let Some(root) = self.roots.get(node) {
+            let path = std::iter::once(root)
+                .chain(suffix.iter().rev())
+                .cloned()
+                .collect();
+            found.insert(path);
+            return;
+        }
+        on_path.insert(node.clone());
+        for (parent, name) in self.parents.get(node).into_iter().flatten() {
+            if !on_path.contains(parent) {
+                suffix.push(name.clone());
+                self.collect(parent, suffix, on_path, found);
+                suffix.pop();
+            }
+        }
+        on_path.remove(node);
+    }
 }
 
 /// Breadth-first walk from all the roots at once, visiting each node's

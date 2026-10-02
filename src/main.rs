@@ -2,6 +2,7 @@ mod cache;
 mod clarification;
 mod date;
 mod evaluation;
+mod explain;
 mod github;
 mod init;
 mod inventory;
@@ -127,6 +128,26 @@ enum Command {
         #[arg(long)]
         timings: bool,
     },
+    /// Show why a Package got its Verdict: its licenses, Waiver, License clarification and Introduction paths
+    #[command(after_help = EVALUATION_HELP)]
+    Explain {
+        /// The Package, `dev` Dependencies included: `name` for all its versions or `name@version`, optionally after its ecosystem, e.g. `npm:@types/ms@0.7.34`
+        package: String,
+        /// Project directory
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Output format
+        #[arg(long, value_enum, default_value_t = explain::Format::Text)]
+        format: explain::Format,
+        /// Write the explanation to this file instead of stdout
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
+        #[command(flatten)]
+        remote: Remote,
+        /// Print how long the run took and how many registry requests it sent on stderr, as when stderr is a terminal
+        #[arg(long)]
+        timings: bool,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -236,6 +257,19 @@ fn run(cli: Cli, start: Instant) -> Result<ExitCode> {
             )?;
             timing::print(timings, start, &evaluation);
             Ok(code)
+        }
+        Command::Explain {
+            package,
+            path,
+            format,
+            output,
+            remote,
+            timings,
+        } => {
+            let (out, evaluation) = explain::explain(&path, &package, format, &remote)?;
+            emit(&out, output.as_deref())?;
+            timing::print(timings, start, &evaluation);
+            Ok(ExitCode::SUCCESS)
         }
     }
 }

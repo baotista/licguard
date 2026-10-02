@@ -1,6 +1,7 @@
 use std::fmt;
 
 use crate::date::Date;
+use crate::inventory::Package;
 
 /// A condition reported by a check that needs attention but never fails the
 /// gate. Sorting puts Warnings in their reporting order: by kind, then
@@ -44,6 +45,26 @@ impl Warning {
             Warning::ExpiredWaiver { .. } => "expired_waiver",
             Warning::ExpiringWaiver { .. } => "expiring_waiver",
         }
+    }
+
+    /// Whether the Warning is about an entry for `package`'s name: one for
+    /// its version or all its versions or, since such an entry matches no
+    /// Package, an unmatched one for another version.
+    pub fn concerns(&self, package: &Package) -> bool {
+        let (name, version, unmatched) = match self {
+            Warning::UnmatchedClarification { package, version }
+            | Warning::UnmatchedWaiver {
+                package, version, ..
+            } => (package, version, true),
+            Warning::ExpiredWaiver {
+                package, version, ..
+            }
+            | Warning::ExpiringWaiver {
+                package, version, ..
+            } => (package, version, false),
+        };
+        *name == package.name
+            && (unmatched || version.as_ref().is_none_or(|v| *v == package.version))
     }
 }
 
