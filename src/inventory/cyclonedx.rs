@@ -56,6 +56,8 @@ struct Component {
     name: String,
     version: Option<String>,
     purl: Option<String>,
+    /// `required` (the default), `optional` or `excluded`.
+    scope: Option<String>,
     #[serde(default)]
     licenses: Vec<LicenseChoice>,
     /// Components nested in this one, e.g. npm's nested `node_modules`.
@@ -129,13 +131,16 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         .and_then(|root| Some((root.bom_ref.clone()?, root.name.clone())))
         .into_iter()
         .collect();
-    let introduction_paths = paths::shortest(&roots, |key: &String, _prod_only| {
+    let introduction_paths = paths::shortest(&roots, |key: &String, prod_only| {
         graph
             .get(key.as_str())
             .into_iter()
             .flat_map(|refs| refs.iter())
             .filter_map(|r| {
                 let child = by_ref.get(r.as_str())?;
+                if prod_only && child.scope() == Scope::Dev {
+                    return None;
+                }
                 let name = package(child).map_or_else(|| child.name.clone(), |p| p.name);
                 Some((name, r.clone()))
             })
@@ -154,7 +159,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             declared_license: declared_license(&component.licenses),
             license_origin: Some(LicenseOrigin::Sbom),
             from_registry: true,
-            scope: Scope::Prod,
+            scope: component.scope(),
             introduction_path: component
                 .bom_ref
                 .as_ref()
@@ -173,6 +178,17 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         }
     }
     Ok(packages.into_values().collect())
+}
+
+impl Component {
+    /// `Dev` when the component is `optional` or `excluded`, i.e. not
+    /// needed at run time; any other component may ship, so it is `Prod`.
+    fn scope(&self) -> Scope {
+        match self.scope.as_deref() {
+            Some("optional" | "excluded") => Scope::Dev,
+            _ => Scope::Prod,
+        }
+    }
 }
 
 /// Appends `components` and the components nested in them to `out`.

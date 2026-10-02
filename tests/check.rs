@@ -3100,6 +3100,10 @@ fn sbom_file_that_is_not_a_cyclonedx_bom_is_a_runtime_error() {
         ("bom.json", r#"{"name": "app", "components": "none"}"#),
         ("reports/app.cdx.json", "not JSON"),
         ("bom.json", r#"{"bomFormat": "SPDX", "specVersion": "1.6"}"#),
+        (
+            "bom.json",
+            r#"{"bomFormat": "CycloneDX", "specVersion": "1.6", "components": "none"}"#,
+        ),
     ] {
         Project::from_fixture("npm-basic")
             .with_policy(ALLOW_ALL)
@@ -3113,6 +3117,172 @@ fn sbom_file_that_is_not_a_cyclonedx_bom_is_a_runtime_error() {
                 "hint: licguard reads every bom.json and *.cdx.json file as a CycloneDX SBOM",
             ));
     }
+}
+
+/// `npm-sbom` is the real `npm-basic` Project and its SBOM, `bom.cdx.json`,
+/// written by `npx @cyclonedx/cyclonedx-npm` 6.0.1, which nests the
+/// components of nested `node_modules` (here `ms@2.1.2` in `debug`).
+#[test]
+fn cyclonedx_sbom_is_an_inventory_source_of_npm_packages() {
+    Project::from_fixture("npm-sbom")
+        .with_policy(ALLOW_ALL)
+        .list_with(&[])
+        .success()
+        .stdout(format!(
+            "licguard {} — 6 packages (npm)\n\n\
+             ALLOW  MIT  @types/ms@0.7.34  listed  sbom  via app > @types/ms\n\
+             ALLOW  MIT  debug@4.3.4       listed  sbom  via app > debug\n\
+             ALLOW  MIT  ms@2.1.2          listed  sbom  via app > debug > ms\n\
+             ALLOW  MIT  ms@2.1.3          listed  sbom  via app > ms\n\
+             ALLOW  ISC  once@1.4.0        listed  sbom  via app > once\n\
+             ALLOW  ISC  wrappy@1.0.2      listed  sbom  via app > once > wrappy\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
+/// Sets the `scope` of the component of `maven-basic` named `name`.
+fn set_component_scope(bom: &mut serde_json::Value, name: &str, scope: &str) {
+    let component = bom["components"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|c| c["name"] == name)
+        .unwrap();
+    component["scope"] = scope.into();
+}
+
+#[test]
+fn optional_and_excluded_components_are_dev() {
+    let project = maven_project(|bom| {
+        set_component_scope(bom, "junit", "optional");
+        set_component_scope(bom, "hamcrest-core", "excluded");
+    });
+    project
+        .check()
+        .success()
+        .stdout(predicate::str::contains("3 packages (maven)"))
+        .stdout(predicate::str::contains("junit").not());
+    let list = stdout_json(project.list_with(&["--include-dev", "--format", "json"]));
+    let scopes: Vec<(&str, &str)> = list["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["name"].as_str().unwrap(), p["scope"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        scopes,
+        [
+            ("junit:junit", "dev"),
+            ("org.apache.commons:commons-lang3", "prod"),
+            ("org.apache.commons:commons-text", "prod"),
+            ("org.hamcrest:hamcrest-core", "dev"),
+            ("org.slf4j:slf4j-api", "prod"),
+        ]
+    );
+}
+
+#[test]
+fn prod_component_path_goes_through_prod_components_only() {
+    let lang = "pkg:maven/org.apache.commons/commons-lang3@3.14.0?type=jar";
+    maven_project(|bom| {
+        set_component_scope(bom, "junit", "optional");
+        // `junit` sorts first, so it would give the path on a tie.
+        let junit = bom["dependencies"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|d| d["ref"] == "pkg:maven/junit/junit@4.13.2?type=jar")
+            .unwrap();
+        junit["dependsOn"].as_array_mut().unwrap().push(lang.into());
+    })
+    .list_with(&["--include-dev"])
+    .success()
+    .stdout(predicate::str::contains(
+        "org.apache.commons:commons-lang3@3.14.0  listed  sbom  via app > org.apache.commons:commons-text > org.apache.commons:commons-lang3\n",
+    ));
+}
+
+#[test]
+fn components_with_the_same_coordinates_are_one_package_prod_if_any_is() {
+    maven_project(|bom| {
+        set_component_scope(bom, "junit", "optional");
+        let components = bom["components"].as_array_mut().unwrap();
+        let mut tests = components
+            .iter()
+            .find(|c| c["name"] == "junit")
+            .unwrap()
+            .clone();
+        let purl = "pkg:maven/junit/junit@4.13.2?classifier=tests&type=test-jar";
+        tests["bom-ref"] = purl.into();
+        tests["purl"] = purl.into();
+        tests["scope"] = "required".into();
+        components.push(tests);
+        bom["dependencies"][0]["dependsOn"]
+            .as_array_mut()
+            .unwrap()
+            .push(purl.into());
+    })
+    .check()
+    .success()
+    .stdout(predicate::str::contains("5 packages (maven)"))
+    .stdout(predicate::str::contains(
+        "REVIEW  EPL-1.0         junit:junit@4.13.2  via app > junit:junit\n",
+    ));
+}
+
+#[test]
+fn component_unreachable_from_the_root_is_prod_without_a_path() {
+    maven_project(|bom| {
+        bom["dependencies"][0]["dependsOn"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|r| r != "pkg:maven/junit/junit@4.13.2?type=jar");
+    })
+    .check()
+    .success()
+    .stdout(predicate::str::contains("5 packages (maven)"))
+    .stdout(predicate::str::contains(
+        "REVIEW  EPL-1.0         junit:junit@4.13.2\n",
+    ));
+}
+
+/// The SBOM of the `npm-sbom` fixture.
+fn npm_sbom() -> String {
+    fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/npm-sbom/bom.cdx.json"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn sbom_is_aggregated_with_the_other_inventory_sources() {
+    let output = Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .write("bom.cdx.json", &npm_sbom())
+        .list_with(&[])
+        .success()
+        .stdout(predicate::str::contains("6 packages (npm)"))
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(output).unwrap();
+    assert_eq!(
+        stdout
+            .matches("  in bom.cdx.json, package-lock.json\n")
+            .count(),
+        6,
+        "{stdout}"
+    );
+}
+
+#[test]
+fn header_names_every_ecosystem_of_the_project() {
+    Project::from_fixture("maven-basic")
+        .with_policy(&format!("{MAVEN_POLICY}\n    unlisted = \"allow\"\n"))
+        .write("web/bom.cdx.json", &npm_sbom())
+        .check()
+        .success()
+        .stdout(predicate::str::contains("11 packages (maven, npm)"));
 }
 
 /// `npm-basic` with one Package per Verdict reason and License origin, under
