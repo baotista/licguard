@@ -198,10 +198,11 @@ pub fn evaluate(project: &Path, include_dev: bool, remote: &Remote) -> Result<Ev
     })
 }
 
-/// Takes from the registry the Declared license of every Package that no
-/// local License origin declares one for and no License clarification
-/// covers, `dev` ones included: Waivers and clarifications are matched
-/// against the whole inventory. The registry's answers come from the cache
+/// Takes from its registry, as the npm configuration of `project` names it,
+/// the Declared license of every Package that no local License origin
+/// declares one for and no License clarification covers, `dev` ones
+/// included: Waivers and clarifications are matched against the whole
+/// inventory. Each registry's answers come from its cache
 /// when it has them and `remote` does not refresh it, else from the network
 /// unless `remote` is offline. Returns how many requests were sent.
 fn fetch_licenses(
@@ -254,8 +255,8 @@ fn fetch_licenses(
 }
 
 /// Takes from the npm `registry` the Declared license of each of
-/// `packages`, with `credentials`, as [`fetch_licenses`] does. Returns the first failure in
-/// Package order, if any, and how many requests were sent.
+/// `packages`, with `credentials`, as [`fetch_licenses`] does. Returns the
+/// first failure in Package order, if any, and how many requests were sent.
 fn fetch_from(
     registry: &str,
     credentials: &Credentials,

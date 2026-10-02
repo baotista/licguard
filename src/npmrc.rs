@@ -155,10 +155,14 @@ struct Found<'a> {
     password: Option<&'a Path>,
 }
 
-/// The user's `.npmrc`: the file `NPM_CONFIG_USERCONFIG` names, else
-/// `.npmrc` in the home directory, `HOME` or else `USERPROFILE`.
+/// The user's `.npmrc`: the file `NPM_CONFIG_USERCONFIG` (or
+/// `npm_config_userconfig`, as `npm run` sets it) names, else `.npmrc` in
+/// the home directory, `HOME` or else `USERPROFILE`.
 fn user_npmrc() -> Option<PathBuf> {
-    if let Some(file) = env::var_os("NPM_CONFIG_USERCONFIG").filter(|f| !f.is_empty()) {
+    if let Some(file) = ["NPM_CONFIG_USERCONFIG", "npm_config_userconfig"]
+        .into_iter()
+        .find_map(|key| env::var_os(key).filter(|file| !file.is_empty()))
+    {
         return Some(PathBuf::from(file));
     }
     ["HOME", "USERPROFILE"]

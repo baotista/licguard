@@ -5041,6 +5041,17 @@ fn npm_config_registry_beats_the_project_npmrc() {
 }
 
 #[test]
+fn user_npmrc_may_be_named_by_npm_config_userconfig_in_lower_case_as_npm_run_sets_it() {
+    let user = registry_with_ms("ISC");
+    let project = project_configured_by_npmrc()
+        .without_env("NPM_CONFIG_USERCONFIG")
+        .write("npm-run.npmrc", &format!("registry={}\n", user.url));
+    let file = project.path().join("npm-run.npmrc");
+    let project = project.with_env("npm_config_userconfig", file.to_str().unwrap());
+    assert_eq!(listed_ms(&project, &[])["license"], "ISC");
+}
+
+#[test]
 fn licguard_npm_registry_beats_npm_config_registry() {
     let env = registry_with_ms("ISC");
     let project = project_with_ms_on_the_registry().with_env("npm_config_registry", &env.url);
