@@ -1,0 +1,479 @@
+{
+  "bomFormat" : "CycloneDX",
+  "specVersion" : "1.6",
+  "serialNumber" : "urn:uuid:fbe82486-af70-3725-be5c-8342e8158257",
+  "version" : 1,
+  "metadata" : {
+    "timestamp" : "2026-10-02T13:41:26Z",
+    "lifecycles" : [
+      {
+        "phase" : "build"
+      }
+    ],
+    "tools" : {
+      "components" : [
+        {
+          "type" : "library",
+          "author" : "OWASP Foundation",
+          "group" : "org.cyclonedx",
+          "name" : "cyclonedx-maven-plugin",
+          "version" : "2.9.3",
+          "description" : "CycloneDX Maven plugin",
+          "hashes" : [
+            {
+              "alg" : "MD5",
+              "content" : "e7c87ab327b65b23c681fc9dc8bb620b"
+            },
+            {
+              "alg" : "SHA-1",
+              "content" : "fa3f0f04f4d5077b5e085d4d09aa2e68aeba5260"
+            },
+            {
+              "alg" : "SHA-256",
+              "content" : "c452d5eebe28bc86bef2e7c72d129f04f60877bef843eac8120f01fb655be293"
+            },
+            {
+              "alg" : "SHA-512",
+              "content" : "ec0344ed2ffe62d565aaf936a37140d04c7fffa8669a666be0366cd44eec3195232d79841cdec47030b79068216ac7e1a8c805255758e3d418dae32a4b9b9beb"
+            },
+            {
+              "alg" : "SHA-384",
+              "content" : "3df26b2a00d87fe090851975ebcc30217f98634e7c47d07128e148f325ebfe3bc0790b2f52ad4591734b7b0de738f003"
+            },
+            {
+              "alg" : "SHA3-384",
+              "content" : "470c1b4962379b5b6494c75bd1475da3519bbe2543999c95f26b4021164d3d05419b0c3f704443162fe5433a204250e9"
+            },
+            {
+              "alg" : "SHA3-256",
+              "content" : "900e9c4edb18940ed3c4a4ba6946957fa613ef0d4b0c380551638f229206373c"
+            },
+            {
+              "alg" : "SHA3-512",
+              "content" : "5e36433e18ae24f7460902da27818874df5d1d73df1a97e49e7369335f7cc61ca595466a2d37789fba7eaa7f7f251b29216c3d7a78910b2ec38e2ed68ea84876"
+            }
+          ]
+        }
+      ]
+    },
+    "component" : {
+      "type" : "library",
+      "bom-ref" : "pkg:maven/com.example/app@1.0.0?type=jar",
+      "group" : "com.example",
+      "name" : "app",
+      "version" : "1.0.0",
+      "purl" : "pkg:maven/com.example/app@1.0.0?type=jar"
+    },
+    "properties" : [
+      {
+        "name" : "maven.goal",
+        "value" : "makeAggregateBom"
+      },
+      {
+        "name" : "maven.scopes",
+        "value" : "compile,provided,runtime,system,test"
+      }
+    ]
+  },
+  "components" : [
+    {
+      "type" : "library",
+      "bom-ref" : "pkg:maven/org.slf4j/slf4j-api@2.0.13?type=jar",
+      "publisher" : "QOS.ch",
+      "group" : "org.slf4j",
+      "name" : "slf4j-api",
+      "version" : "2.0.13",
+      "description" : "The slf4j API",
+      "scope" : "required",
+      "hashes" : [
+        {
+          "alg" : "MD5",
+          "content" : "7f4028aa04f75427327f3f30cd62ba4e"
+        },
+        {
+          "alg" : "SHA-1",
+          "content" : "80229737f704b121a318bba5d5deacbcf395bc77"
+        },
+        {
+          "alg" : "SHA-256",
+          "content" : "e7c2a48e8515ba1f49fa637d57b4e2f590b3f5bd97407ac699c3aa5efb1204a9"
+        },
+        {
+          "alg" : "SHA-512",
+          "content" : "b4eeb5757118e264ec7f107d879270784357380d6f53471b7874dd7e0166fdf5686a95eb66bab867abbe9536da032ab052e207165211391c293cbf6178431fb6"
+        },
+        {
+          "alg" : "SHA-384",
+          "content" : "b67cbb4ef32141423000dd4e067bf32e0c1dd2c4689c611522b9fedfc1744513175a22f4b1276f2cec4721c9467cf882"
+        },
+        {
+          "alg" : "SHA3-384",
+          "content" : "817fc9641f4fc52bfd76006886c6eba975f6f09b2a7cc59334729a8cc033807c8e89be9ec4309acfc16ed65ff6eee018"
+        },
+        {
+          "alg" : "SHA3-256",
+          "content" : "f26080cceb5a2e605f3844d6dc8dd3f14c543cb14510765d841d71a64fa454dc"
+        },
+        {
+          "alg" : "SHA3-512",
+          "content" : "00646c78d65ec854e157638f40735f1888aa585ede59915d58386c599c2fe54ec8c1da73284aeff00ce3142165e33c4c995ad39d08843c31e9e4d7e32c746836"
+        }
+      ],
+      "licenses" : [
+        {
+          "license" : {
+            "id" : "MIT",
+            "url" : "https://opensource.org/license/mit/"
+          }
+        }
+      ],
+      "purl" : "pkg:maven/org.slf4j/slf4j-api@2.0.13?type=jar",
+      "externalReferences" : [
+        {
+          "type" : "website",
+          "url" : "http://www.slf4j.org"
+        },
+        {
+          "type" : "distribution-intake",
+          "url" : "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
+        },
+        {
+          "type" : "vcs",
+          "url" : "https://github.com/qos-ch/slf4j/slf4j-parent/slf4j-api"
+        }
+      ]
+    },
+    {
+      "type" : "library",
+      "bom-ref" : "pkg:maven/org.apache.commons/commons-text@1.12.0?type=jar",
+      "publisher" : "The Apache Software Foundation",
+      "group" : "org.apache.commons",
+      "name" : "commons-text",
+      "version" : "1.12.0",
+      "description" : "Apache Commons Text is a set of utility functions and reusable components for the purpose of processing and manipulating text that should be of use in a Java environment.",
+      "scope" : "required",
+      "hashes" : [
+        {
+          "alg" : "MD5",
+          "content" : "544add6fbc8d4b100b07c3692d08099e"
+        },
+        {
+          "alg" : "SHA-1",
+          "content" : "66aa90dc099701c4d3b14bd256c328f592ccf0d6"
+        },
+        {
+          "alg" : "SHA-256",
+          "content" : "de023257ff166044a56bd1aa9124e843cd05dac5806cc705a9311f3556d5a15f"
+        },
+        {
+          "alg" : "SHA-512",
+          "content" : "7d198cc288e4d515f37c81d0dcd1210bce3594d2a06a11f6a78566d33c33acdb4f292b0b42c87281b69fe3af891966bca708e25fa29b1b3536e9f951f5b57d7c"
+        },
+        {
+          "alg" : "SHA-384",
+          "content" : "4f471c41486a396f25e6956750440aa05c294778ae1ffaafba1f8596f0d49da45b56ad829d59343900fca7c0db461bbe"
+        },
+        {
+          "alg" : "SHA3-384",
+          "content" : "685ab7392554fd43e5ec7fcd1f6faab19a74d0541927e947334ac9ae1e97e6d12590998f091ef4293738e3763999a6cc"
+        },
+        {
+          "alg" : "SHA3-256",
+          "content" : "ed3e3bb796583c58c587be9c692cef80f6e7496120963d9b47cef453d2b6f20d"
+        },
+        {
+          "alg" : "SHA3-512",
+          "content" : "f5fcacd33f37676d354c836329c41347a4023f851ec0b24785c64c46c72c609dc64599413f2a6a3ecab4e45fcdbb3b487ca36a9b67fcd1c457bd09e1b5530137"
+        }
+      ],
+      "licenses" : [
+        {
+          "license" : {
+            "id" : "Apache-2.0",
+            "url" : "https://www.apache.org/licenses/LICENSE-2.0"
+          }
+        }
+      ],
+      "purl" : "pkg:maven/org.apache.commons/commons-text@1.12.0?type=jar",
+      "externalReferences" : [
+        {
+          "type" : "website",
+          "url" : "https://commons.apache.org/proper/commons-text"
+        },
+        {
+          "type" : "build-system",
+          "url" : "https://github.com/apache/commons-parent/actions"
+        },
+        {
+          "type" : "distribution-intake",
+          "url" : "https://repository.apache.org/service/local/staging/deploy/maven2"
+        },
+        {
+          "type" : "issue-tracker",
+          "url" : "https://issues.apache.org/jira/browse/TEXT"
+        },
+        {
+          "type" : "mailing-list",
+          "url" : "https://mail-archives.apache.org/mod_mbox/commons-user/"
+        },
+        {
+          "type" : "vcs",
+          "url" : "https://gitbox.apache.org/repos/asf?p=commons-text.git"
+        }
+      ]
+    },
+    {
+      "type" : "library",
+      "bom-ref" : "pkg:maven/org.apache.commons/commons-lang3@3.14.0?type=jar",
+      "publisher" : "The Apache Software Foundation",
+      "group" : "org.apache.commons",
+      "name" : "commons-lang3",
+      "version" : "3.14.0",
+      "description" : "Apache Commons Lang, a package of Java utility classes for the classes that are in java.lang's hierarchy, or are considered to be so standard as to justify existence in java.lang.",
+      "scope" : "required",
+      "hashes" : [
+        {
+          "alg" : "MD5",
+          "content" : "4e5c3f5e6b0b965ef241d7d72ac8971f"
+        },
+        {
+          "alg" : "SHA-1",
+          "content" : "1ed471194b02f2c6cb734a0cd6f6f107c673afae"
+        },
+        {
+          "alg" : "SHA-256",
+          "content" : "7b96bf3ee68949abb5bc465559ac270e0551596fa34523fddf890ec418dde13c"
+        },
+        {
+          "alg" : "SHA-512",
+          "content" : "0338b50767166e5746ada6d6aa2e071e7221d699323bfb629f7f204b294c1dc4cad140610a129ed751798443b43e74e0818989c7df7d33c5915aa29742be9ba8"
+        },
+        {
+          "alg" : "SHA-384",
+          "content" : "908d0a22dc17aaa04caa5104cff7cad5b88b77eecb78dd5b3b3fefa22ff71ac50a4fb9e31c897ac243f9d841e4b3453d"
+        },
+        {
+          "alg" : "SHA3-384",
+          "content" : "8a7f2e061b998780870eddd571620fbf3d3c70bcb54e24539d0db504f59d65bc6bda58136284498babe29fcc5eabb7a6"
+        },
+        {
+          "alg" : "SHA3-256",
+          "content" : "022bf1f8039fcea717e9e34dd96eb80cfff05b43c9cbb76e9739b2421e2d027c"
+        },
+        {
+          "alg" : "SHA3-512",
+          "content" : "0bcbc4edce974ea970c46e2da12ec98d9fd962c2cf64f757ac97136dec5623ca52af0c225895303c17ffabb57090e6772d7bd326d5e7438cef5454f8bbaeecfa"
+        }
+      ],
+      "licenses" : [
+        {
+          "license" : {
+            "id" : "Apache-2.0",
+            "url" : "https://www.apache.org/licenses/LICENSE-2.0"
+          }
+        }
+      ],
+      "purl" : "pkg:maven/org.apache.commons/commons-lang3@3.14.0?type=jar",
+      "externalReferences" : [
+        {
+          "type" : "website",
+          "url" : "https://commons.apache.org/proper/commons-lang/"
+        },
+        {
+          "type" : "build-system",
+          "url" : "https://github.com/apache/commons-parent/actions"
+        },
+        {
+          "type" : "distribution-intake",
+          "url" : "https://repository.apache.org/service/local/staging/deploy/maven2"
+        },
+        {
+          "type" : "issue-tracker",
+          "url" : "https://issues.apache.org/jira/browse/LANG"
+        },
+        {
+          "type" : "mailing-list",
+          "url" : "https://mail-archives.apache.org/mod_mbox/commons-user/"
+        },
+        {
+          "type" : "vcs",
+          "url" : "https://gitbox.apache.org/repos/asf?p=commons-lang.git"
+        }
+      ]
+    },
+    {
+      "type" : "library",
+      "bom-ref" : "pkg:maven/junit/junit@4.13.2?type=jar",
+      "publisher" : "JUnit",
+      "group" : "junit",
+      "name" : "junit",
+      "version" : "4.13.2",
+      "description" : "JUnit is a unit testing framework for Java, created by Erich Gamma and Kent Beck.",
+      "scope" : "required",
+      "hashes" : [
+        {
+          "alg" : "MD5",
+          "content" : "d98a9a02a99a9acd22d7653cbcc1f31f"
+        },
+        {
+          "alg" : "SHA-1",
+          "content" : "8ac9e16d933b6fb43bc7f576336b8f4d7eb5ba12"
+        },
+        {
+          "alg" : "SHA-256",
+          "content" : "8e495b634469d64fb8acfa3495a065cbacc8a0fff55ce1e31007be4c16dc57d3"
+        },
+        {
+          "alg" : "SHA-512",
+          "content" : "a31b9950f929a7e5a600d89787ef40e42a8a8e2392e210d0c0f45b3572937670a18a524f1815508cd1152cd1eaa7275cb7430ba45c053be365c83c231bccd3f0"
+        },
+        {
+          "alg" : "SHA-384",
+          "content" : "9f85c56a77c699eb87630b9e8224068a34c296bcd9aadb52248dd4665036f5bf1048fe75e5cb590b59e7855ca716acae"
+        },
+        {
+          "alg" : "SHA3-384",
+          "content" : "590cfd9396424583879ca8ad732870406bab18325ac72fb2bbe188b9611278d6341700badf7cfc32525b8ff42900c905"
+        },
+        {
+          "alg" : "SHA3-256",
+          "content" : "a06b3fd2fd1d9f4306b58125484e3605a395afe5ffe2c801e43ae462f366a430"
+        },
+        {
+          "alg" : "SHA3-512",
+          "content" : "a6d25ce3c14f9065f06dfd0e68e1dad5c03bd5de0a302c44ca4733d2cb87ec1bc6f0abd36d65aeee8caf328b6881432c4b682fa4b4b1fa931c3c950de5129fb2"
+        }
+      ],
+      "licenses" : [
+        {
+          "license" : {
+            "id" : "EPL-1.0",
+            "url" : "http://www.eclipse.org/legal/epl-v10.html"
+          }
+        }
+      ],
+      "purl" : "pkg:maven/junit/junit@4.13.2?type=jar",
+      "externalReferences" : [
+        {
+          "type" : "website",
+          "url" : "http://junit.org"
+        },
+        {
+          "type" : "build-system",
+          "url" : "https://github.com/junit-team/junit4/actions"
+        },
+        {
+          "type" : "distribution",
+          "url" : "https://github.com/junit-team/junit4/wiki/Download-and-Install"
+        },
+        {
+          "type" : "distribution-intake",
+          "url" : "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
+        },
+        {
+          "type" : "issue-tracker",
+          "url" : "https://github.com/junit-team/junit4/issues"
+        },
+        {
+          "type" : "vcs",
+          "url" : "https://github.com/junit-team/junit4"
+        }
+      ]
+    },
+    {
+      "type" : "library",
+      "bom-ref" : "pkg:maven/org.hamcrest/hamcrest-core@1.3?type=jar",
+      "group" : "org.hamcrest",
+      "name" : "hamcrest-core",
+      "version" : "1.3",
+      "description" : "This is the core API of hamcrest matcher framework to be used by third-party framework providers. This includes the a foundation set of matcher implementations for common operations.",
+      "scope" : "required",
+      "hashes" : [
+        {
+          "alg" : "MD5",
+          "content" : "6393363b47ddcbba82321110c3e07519"
+        },
+        {
+          "alg" : "SHA-1",
+          "content" : "42a25dc3219429f0e5d060061f71acb49bf010a0"
+        },
+        {
+          "alg" : "SHA-256",
+          "content" : "66fdef91e9739348df7a096aa384a5685f4e875584cce89386a7a47251c4d8e9"
+        },
+        {
+          "alg" : "SHA-512",
+          "content" : "e237ae735aac4fa5a7253ec693191f42ef7ddce384c11d29fbf605981c0be077d086757409acad53cb5b9e53d86a07cc428d459ff0f5b00d32a8cbbca390be49"
+        },
+        {
+          "alg" : "SHA-384",
+          "content" : "4b5297d2a12cc32b824153afc83f1ba9f1869ca288330f0a2f759659d09e4c420eb6ba4a1efbfa0657b625edd41293d5"
+        },
+        {
+          "alg" : "SHA3-384",
+          "content" : "b14d34985c0a78cf0ba19b5a18bffd403e08adcb2afde228ddef6e16121c7046dbebf58c04d3419311c4496c48aa93be"
+        },
+        {
+          "alg" : "SHA3-256",
+          "content" : "f679af77deedf69b3c3066f7916583848c6fd32a950f9c0b0e2ef1da121717ba"
+        },
+        {
+          "alg" : "SHA3-512",
+          "content" : "bca821931e438a1977b7b4356b5f8cebf485634f82159d505c48267c34e6a0f4fde9c2917331365f66dc0e52e2ca3a2db5256863584110c27ecebefc28741f63"
+        }
+      ],
+      "licenses" : [
+        {
+          "license" : {
+            "id" : "BSD-3-Clause"
+          }
+        }
+      ],
+      "purl" : "pkg:maven/org.hamcrest/hamcrest-core@1.3?type=jar",
+      "externalReferences" : [
+        {
+          "type" : "website",
+          "url" : "https://github.com/hamcrest/JavaHamcrest/hamcrest-core"
+        },
+        {
+          "type" : "vcs",
+          "url" : "https://github.com/hamcrest/JavaHamcrest/hamcrest-core"
+        }
+      ]
+    }
+  ],
+  "dependencies" : [
+    {
+      "ref" : "pkg:maven/com.example/app@1.0.0?type=jar",
+      "dependsOn" : [
+        "pkg:maven/org.slf4j/slf4j-api@2.0.13?type=jar",
+        "pkg:maven/org.apache.commons/commons-text@1.12.0?type=jar",
+        "pkg:maven/junit/junit@4.13.2?type=jar"
+      ]
+    },
+    {
+      "ref" : "pkg:maven/org.slf4j/slf4j-api@2.0.13?type=jar",
+      "dependsOn" : [ ]
+    },
+    {
+      "ref" : "pkg:maven/org.apache.commons/commons-text@1.12.0?type=jar",
+      "dependsOn" : [
+        "pkg:maven/org.apache.commons/commons-lang3@3.14.0?type=jar"
+      ]
+    },
+    {
+      "ref" : "pkg:maven/org.apache.commons/commons-lang3@3.14.0?type=jar",
+      "dependsOn" : [ ]
+    },
+    {
+      "ref" : "pkg:maven/junit/junit@4.13.2?type=jar",
+      "dependsOn" : [
+        "pkg:maven/org.hamcrest/hamcrest-core@1.3?type=jar"
+      ]
+    },
+    {
+      "ref" : "pkg:maven/org.hamcrest/hamcrest-core@1.3?type=jar",
+      "dependsOn" : [ ]
+    }
+  ]
+}

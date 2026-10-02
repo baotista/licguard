@@ -534,7 +534,7 @@ fn missing_lockfile_is_a_runtime_error() {
         .check()
         .code(2)
         .stderr(predicate::str::contains(
-            "no package-lock.json, yarn.lock or pnpm-lock.yaml found under",
+            "no package-lock.json, yarn.lock, pnpm-lock.yaml or CycloneDX SBOM (bom.json, *.cdx.json) found under",
         ))
         .stderr(predicate::str::contains("hint:"));
 }
@@ -2991,6 +2991,130 @@ fn pnpm_lockfile_is_aggregated_with_the_other_inventory_sources() {
         ));
 }
 
+/// `maven-basic` is a real Maven Project and its SBOM, `target/bom.json`,
+/// written by `mvn org.cyclonedx:cyclonedx-maven-plugin:2.9.3:makeAggregateBom
+/// -DoutputFormat=json -DincludeTestScope=true`: the root `app` depends on
+/// `org.slf4j:slf4j-api` (MIT), `org.apache.commons:commons-text`
+/// (Apache-2.0, which pulls `org.apache.commons:commons-lang3`) and, in the
+/// `test` scope, `junit:junit` (EPL-1.0, which pulls
+/// `org.hamcrest:hamcrest-core`, BSD-3-Clause). The plugin marks every
+/// component `required`, the test-scoped ones included.
+const MAVEN_SBOM: &str = "target/bom.json";
+
+const MAVEN_POLICY: &str = r#"
+    [policy]
+    allow = ["MIT", "Apache-2.0", "BSD-3-Clause"]
+    review = ["EPL-1.0"]
+"#;
+
+#[test]
+fn cyclonedx_sbom_is_an_inventory_source_of_maven_packages() {
+    Project::from_fixture("maven-basic")
+        .with_policy(MAVEN_POLICY)
+        .list_with(&[])
+        .success()
+        .stdout(format!(
+            "licguard {} — 5 packages (maven)\n\n\
+             REVIEW  EPL-1.0       junit:junit@4.13.2                       listed  sbom  via app > junit:junit\n\
+             ALLOW   Apache-2.0    org.apache.commons:commons-lang3@3.14.0  listed  sbom  via app > org.apache.commons:commons-text > org.apache.commons:commons-lang3\n\
+             ALLOW   Apache-2.0    org.apache.commons:commons-text@1.12.0   listed  sbom  via app > org.apache.commons:commons-text\n\
+             ALLOW   BSD-3-Clause  org.hamcrest:hamcrest-core@1.3           listed  sbom  via app > junit:junit > org.hamcrest:hamcrest-core\n\
+             ALLOW   MIT           org.slf4j:slf4j-api@2.0.13               listed  sbom  via app > org.slf4j:slf4j-api\n",
+            env!("CARGO_PKG_VERSION")
+        ));
+}
+
+/// The `maven-basic` Project with its SBOM edited by `edit`.
+fn maven_project(edit: impl FnOnce(&mut serde_json::Value)) -> Project {
+    let project = Project::from_fixture("maven-basic").with_policy(MAVEN_POLICY);
+    let path = project.path().join(MAVEN_SBOM);
+    let mut bom: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut bom);
+    fs::write(path, serde_json::to_string_pretty(&bom).unwrap()).unwrap();
+    project
+}
+
+#[test]
+fn cyclonedx_spec_versions_1_4_to_1_6_are_supported() {
+    for version in ["1.4", "1.5", "1.6"] {
+        maven_project(|bom| bom["specVersion"] = version.into())
+            .check()
+            .success()
+            .stdout(predicate::str::contains("5 packages (maven)"));
+    }
+}
+
+#[test]
+fn cyclonedx_spec_version_other_than_1_4_to_1_6_is_rejected_with_a_fix() {
+    for version in ["1.3", "1.7", "2.0"] {
+        maven_project(|bom| bom["specVersion"] = version.into())
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "target/bom.json uses CycloneDX specVersion {version}, which is not supported"
+            )))
+            .stderr(predicate::str::contains(
+                "hint: regenerate it in CycloneDX 1.4, 1.5 or 1.6",
+            ));
+    }
+}
+
+#[test]
+fn sbom_is_found_under_the_names_and_build_directories_of_the_cyclonedx_tools() {
+    for target in [
+        "build/reports/bom.json",
+        "target/bom.cdx.json",
+        "sboms/app.cdx.json",
+    ] {
+        Project::from_fixture("maven-basic")
+            .with_policy(MAVEN_POLICY)
+            .rename(MAVEN_SBOM, "sbom.json")
+            .remove("target")
+            .write(target, "")
+            .rename("sbom.json", target)
+            .list_with(&["--format", "json"])
+            .success()
+            .stdout(predicate::str::contains(format!(
+                r#""sources": [
+        "{target}"
+      ]"#
+            )));
+    }
+}
+
+#[test]
+fn sboms_in_node_modules_and_hidden_directories_are_ignored() {
+    Project::from_fixture("npm-basic")
+        .with_policy(ALLOW_ALL)
+        .write("node_modules/once/bom.json", "not an SBOM")
+        .write(".cache/app.cdx.json", "not an SBOM")
+        .check()
+        .success()
+        .stdout(predicate::str::contains("6 packages (npm)"));
+}
+
+#[test]
+fn sbom_file_that_is_not_a_cyclonedx_bom_is_a_runtime_error() {
+    for (file, contents) in [
+        ("bom.json", r#"{"name": "app", "components": "none"}"#),
+        ("reports/app.cdx.json", "not JSON"),
+        ("bom.json", r#"{"bomFormat": "SPDX", "specVersion": "1.6"}"#),
+    ] {
+        Project::from_fixture("npm-basic")
+            .with_policy(ALLOW_ALL)
+            .write(file, contents)
+            .check()
+            .code(2)
+            .stderr(predicate::str::contains(format!(
+                "{file} is not a CycloneDX JSON SBOM"
+            )))
+            .stderr(predicate::str::contains(
+                "hint: licguard reads every bom.json and *.cdx.json file as a CycloneDX SBOM",
+            ));
+    }
+}
+
 /// `npm-basic` with one Package per Verdict reason and License origin, under
 /// [`DENY_ISC`]: `debug` is clarified, `ms@2.1.3` is Unresolved, `wrappy` is
 /// not installed.
@@ -3460,7 +3584,7 @@ fn list_exits_2_only_on_a_runtime_error() {
         .code(2)
         .stdout("")
         .stderr(predicate::str::contains(
-            "no package-lock.json, yarn.lock or pnpm-lock.yaml found under",
+            "no package-lock.json, yarn.lock, pnpm-lock.yaml or CycloneDX SBOM (bom.json, *.cdx.json) found under",
         ))
         .stderr(predicate::str::contains("hint:"));
 }

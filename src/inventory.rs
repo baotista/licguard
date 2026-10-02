@@ -7,9 +7,11 @@ use anyhow::{Context, Result, bail};
 
 use crate::ecosystem::Ecosystem;
 
+mod cyclonedx;
 pub mod npm;
 mod paths;
 pub mod pnpm;
+mod purl;
 pub mod yarn;
 
 /// The Packages of a Project, and the Inventory sources they come from.
@@ -22,10 +24,11 @@ pub struct Inventory {
 /// Reads every Inventory source of the Project, in sorted order, and returns
 /// its Packages, each once: see [`LicensedPackage::merge`].
 pub fn inventory(project: &Path) -> Result<Inventory> {
-    let sources = lockfiles(project)?;
+    let sources = sources(project)?;
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for source in &sources {
         let found = match source.rsplit('/').next() {
+            Some(name) if cyclonedx::is_sbom(name) => cyclonedx::inventory(project, source)?,
             Some(yarn::LOCKFILE) => yarn::inventory(project, source)?,
             Some(pnpm::LOCKFILE) => pnpm::inventory(project, source)?,
             _ => npm::inventory(project, source)?,
@@ -46,15 +49,16 @@ pub fn inventory(project: &Path) -> Result<Inventory> {
 }
 
 /// Finds the Project's Inventory sources: every `package-lock.json`,
-/// `yarn.lock` and `pnpm-lock.yaml` under `project`, skipping `node_modules`
-/// and hidden directories. Returns their paths relative to `project`, joined
+/// `yarn.lock`, `pnpm-lock.yaml` and CycloneDX SBOM (see
+/// [`cyclonedx::is_sbom`]) under `project`, skipping `node_modules` and
+/// hidden directories. Returns their paths relative to `project`, joined
 /// with `/`, sorted.
-fn lockfiles(project: &Path) -> Result<Vec<String>> {
+fn sources(project: &Path) -> Result<Vec<String>> {
     let mut found = Vec::new();
-    find_lockfiles(project, "", &mut found)?;
+    find_sources(project, "", &mut found)?;
     if found.is_empty() {
         bail!(
-            "no {}, {} or {} found under {}\nhint: run licguard at the root of an npm, Yarn or pnpm Project, or run `npm install`, `yarn install` or `pnpm install` to create the lockfile",
+            "no {}, {}, {} or CycloneDX SBOM (bom.json, *.cdx.json) found under {}\nhint: run licguard at the root of an npm, Yarn or pnpm Project, or run `npm install`, `yarn install` or `pnpm install` to create the lockfile; for another Project, generate a CycloneDX JSON SBOM of it, e.g. with cyclonedx-maven-plugin",
             npm::LOCKFILE,
             yarn::LOCKFILE,
             pnpm::LOCKFILE,
@@ -65,7 +69,7 @@ fn lockfiles(project: &Path) -> Result<Vec<String>> {
     Ok(found)
 }
 
-fn find_lockfiles(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result<()> {
+fn find_sources(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result<()> {
     let entries = fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
@@ -75,11 +79,12 @@ fn find_lockfiles(dir: &Path, relative: &str, found: &mut Vec<String>) -> Result
             .file_type()
             .with_context(|| format!("cannot read {}", entry.path().display()))?;
         if file_type.is_file()
-            && [npm::LOCKFILE, yarn::LOCKFILE, pnpm::LOCKFILE].contains(&name.as_str())
+            && ([npm::LOCKFILE, yarn::LOCKFILE, pnpm::LOCKFILE].contains(&name.as_str())
+                || cyclonedx::is_sbom(&name))
         {
             found.push(path);
         } else if file_type.is_dir() && name != "node_modules" && !name.starts_with('.') {
-            find_lockfiles(&entry.path(), &format!("{path}/"), found)?;
+            find_sources(&entry.path(), &format!("{path}/"), found)?;
         }
     }
     Ok(())
@@ -187,8 +192,10 @@ pub enum LicenseOrigin {
     Clarification,
     /// The installed copy of the Package, e.g. its `node_modules` manifest.
     Installed,
-    /// The Inventory source itself.
+    /// The Inventory source itself, when it is a lockfile.
     Lockfile,
+    /// The Inventory source itself, when it is an SBOM.
+    Sbom,
     /// The npm registry's metadata for the Package's version.
     Registry,
 }
@@ -199,6 +206,7 @@ impl LicenseOrigin {
             LicenseOrigin::Clarification => "clarification",
             LicenseOrigin::Installed => "installed",
             LicenseOrigin::Lockfile => "lockfile",
+            LicenseOrigin::Sbom => "sbom",
             LicenseOrigin::Registry => "registry",
         }
     }
