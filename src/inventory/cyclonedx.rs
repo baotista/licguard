@@ -162,11 +162,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<(Vec<LicensedPackage>, 
             .into_iter()
             .find_map(|(key, value)| lines.get(&(key, value.clone()?)).copied());
         let Some((package, from_registry)) = package(component) else {
-            // Named by its `bom-ref`, which identifies it in the SBOM.
-            let (name, version) = match &component.bom_ref {
-                Some(bom_ref) => (bom_ref.clone(), None),
-                None => (component.name.clone(), component.version.clone()),
-            };
+            let (name, version) = component.identity();
             warnings.push(Warning::UnsupportedComponent {
                 component: name,
                 version,
@@ -175,6 +171,13 @@ pub fn inventory(project: &Path, source: &str) -> Result<(Vec<LicensedPackage>, 
             });
             continue;
         };
+        if package.version.is_empty() {
+            bail!(
+                "{}: component `{}` has no version\nhint: regenerate the SBOM with a CycloneDX tool that records the version of each component",
+                path.display(),
+                component.identity().0
+            );
+        }
         let declared_license = declared_license(&component.licenses);
         let found = LicensedPackage {
             license_origin: declared_license.as_ref().map(|_| LicenseOrigin::Sbom),
@@ -202,6 +205,15 @@ pub fn inventory(project: &Path, source: &str) -> Result<(Vec<LicensedPackage>, 
 }
 
 impl Component {
+    /// How reports name the component: by its `bom-ref`, which identifies
+    /// it in the SBOM, else by its name and version.
+    fn identity(&self) -> (String, Option<String>) {
+        match &self.bom_ref {
+            Some(bom_ref) => (bom_ref.clone(), None),
+            None => (self.name.clone(), self.version.clone()),
+        }
+    }
+
     /// `Dev` when the component is `optional` or `excluded`, i.e. not
     /// needed at run time; any other component may ship, so it is `Prod`.
     fn scope(&self) -> Scope {
@@ -251,14 +263,19 @@ const LOCATION_QUALIFIERS: [&str; 3] = ["repository_url", "download_url", "vcs_u
 /// comes from its ecosystem's registry: when it names no other location
 /// (see [`LOCATION_QUALIFIERS`]). `None` when the component has no purl, or
 /// one of an ecosystem licguard does not support. Other qualifiers, e.g.
-/// Maven's `type` and `classifier`, name files of the same Package.
+/// Maven's `type` and `classifier`, name files of the same Package. The
+/// version is the purl's, else the component's, else empty.
 fn package(component: &Component) -> Option<(Package, bool)> {
     let purl = Purl::parse(component.purl.as_deref()?)?;
     let ecosystem = Ecosystem::from_purl_type(&purl.kind)?;
     let package = Package {
         ecosystem,
         name: ecosystem.package_name(purl.namespace.as_deref(), &purl.name),
-        version: purl.version.or_else(|| component.version.clone())?,
+        // Checked by the caller, which knows the SBOM.
+        version: purl
+            .version
+            .or_else(|| component.version.clone())
+            .unwrap_or_default(),
     };
     let from_registry = !purl
         .qualifiers

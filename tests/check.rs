@@ -3061,6 +3061,33 @@ fn cyclonedx_spec_version_other_than_1_4_to_1_6_is_rejected_with_a_fix() {
 }
 
 #[test]
+fn list_json_names_the_ecosystem_and_coordinates_of_a_maven_package() {
+    let json = stdout_json(
+        Project::from_fixture("maven-basic")
+            .with_policy(MAVEN_POLICY)
+            .list_with(&["--format", "json"])
+            .success(),
+    );
+    assert_eq!(
+        json_package(&json["packages"], "org.hamcrest:hamcrest-core", "1.3"),
+        &serde_json::json!({
+            "ecosystem": "maven",
+            "name": "org.hamcrest:hamcrest-core",
+            "version": "1.3",
+            "scope": "prod",
+            "declared_license": "BSD-3-Clause",
+            "license": "BSD-3-Clause",
+            "elected": null,
+            "verdict": "allow",
+            "reason": "listed",
+            "origin": "sbom",
+            "introduction_path": ["app", "junit:junit", "org.hamcrest:hamcrest-core"],
+            "sources": ["target/bom.json"],
+        })
+    );
+}
+
+#[test]
 fn sbom_is_found_under_the_names_and_build_directories_of_the_cyclonedx_tools() {
     for target in [
         "build/reports/bom.json",
@@ -3485,6 +3512,34 @@ fn check_json_reports_unsupported_components_with_their_sbom() {
             },
         ])
     );
+}
+
+#[test]
+fn component_purl_without_a_version_takes_the_component_version_else_is_a_runtime_error() {
+    fn unversioned(bom: &mut serde_json::Value) -> &mut serde_json::Value {
+        let components = bom["components"].as_array_mut().unwrap();
+        let junit = components
+            .iter_mut()
+            .find(|c| c["name"] == "junit")
+            .unwrap();
+        junit["purl"] = "pkg:maven/junit/junit?type=jar".into();
+        junit
+    }
+    maven_project(|bom| {
+        unversioned(bom);
+    })
+    .check()
+    .success()
+    .stdout(predicate::str::contains("junit:junit@4.13.2"));
+    maven_project(|bom| {
+        unversioned(bom).as_object_mut().unwrap().remove("version");
+    })
+    .check()
+    .code(2)
+    .stderr(predicate::str::contains(
+        "target/bom.json: component `pkg:maven/junit/junit@4.13.2?type=jar` has no version",
+    ))
+    .stderr(predicate::str::contains("hint:"));
 }
 
 #[test]
