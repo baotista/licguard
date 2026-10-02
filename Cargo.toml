@@ -1,6 +1,6 @@
 [package]
 name = "licguard"
-version = "0.1.0"
+version = "0.1.0-alpha.1"
 edition = "2024"
 description = "Check the licenses of your project's dependencies against your license policy"
 license = "Apache-2.0"
