@@ -5,6 +5,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use crate::ecosystem::Ecosystem;
+
 pub mod npm;
 mod paths;
 pub mod pnpm;
@@ -102,19 +104,6 @@ pub struct Package {
     pub version: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Ecosystem {
-    Npm,
-}
-
-impl std::fmt::Display for Ecosystem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Ecosystem::Npm => f.write_str("npm"),
-        }
-    }
-}
-
 /// A Package together with its Declared license, if one was found, and how
 /// the Project uses it.
 #[derive(Debug)]
@@ -123,10 +112,10 @@ pub struct LicensedPackage {
     pub declared_license: Option<String>,
     /// Where the Declared license came from; `None` when there is none.
     pub license_origin: Option<LicenseOrigin>,
-    /// Whether every Inventory source says the Package comes from an npm
-    /// registry, so that the registry's metadata describes it: a git,
-    /// tarball or local dependency may differ from the registry Package of
-    /// the same name and version.
+    /// Whether every Inventory source says the Package comes from its
+    /// ecosystem's registry, so that the registry's metadata describes it: a
+    /// git, tarball or local dependency may differ from the registry Package
+    /// of the same name and version.
     pub from_registry: bool,
     pub scope: Scope,
     /// Package names from a root (the Project root or a Workspace member) to

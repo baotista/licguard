@@ -8,9 +8,7 @@ use anyhow::Result;
 
 use crate::cache::Cache;
 use crate::date::Date;
-use crate::inventory::{
-    self, Ecosystem, Inventory, LicenseOrigin, LicensedPackage, Package, Scope,
-};
+use crate::inventory::{self, Inventory, LicenseOrigin, LicensedPackage, Package, Scope};
 use crate::policy::{Policy, Reason, Verdict};
 use crate::registry::Answer;
 use crate::warning::Warning;
@@ -213,12 +211,11 @@ fn fetch_licenses(inventory: &mut Inventory, policy: &Policy, remote: &Remote) -
     let missing: Vec<&mut LicensedPackage> = inventory
         .packages
         .iter_mut()
-        .filter(|p| match p.package.ecosystem {
-            Ecosystem::Npm => {
-                p.from_registry
-                    && p.declared_license.is_none()
-                    && clarification::find(&policy.clarifications, &p.package).is_none()
-            }
+        .filter(|p| {
+            p.package.ecosystem.has_registry()
+                && p.from_registry
+                && p.declared_license.is_none()
+                && clarification::find(&policy.clarifications, &p.package).is_none()
         })
         .collect();
     if missing.is_empty() {
