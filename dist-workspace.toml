@@ -13,6 +13,9 @@ installers = ["shell", "powershell", "homebrew"]
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-apple-darwin", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # Where to host releases
 hosting = "github"
+# Release from the Actions tab (workflow_dispatch with the tag as input)
+# instead of on a tag push; dist creates the tag along with the Release
+dispatch-releases = true
 # A GitHub repo to push Homebrew formulas to
 tap = "baotista/homebrew-tap"
 # Publish jobs to run in CI: "homebrew" pushes the formula to the tap (needs
