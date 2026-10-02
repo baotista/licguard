@@ -148,6 +148,8 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
             .collect()
     });
 
+    let lines = value_lines(&text);
+
     let mut packages: BTreeMap<Package, LicensedPackage> = BTreeMap::new();
     for component in components {
         if component.bom_ref.is_some() && component.bom_ref == root_ref {
@@ -156,6 +158,9 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         let Some((package, from_registry)) = package(component) else {
             continue;
         };
+        let line = [("bom-ref", &component.bom_ref), ("purl", &component.purl)]
+            .into_iter()
+            .find_map(|(key, value)| lines.get(&(key, value.clone()?)).copied());
         let declared_license = declared_license(&component.licenses);
         let found = LicensedPackage {
             license_origin: declared_license.as_ref().map(|_| LicenseOrigin::Sbom),
@@ -168,7 +173,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
                 .and_then(|r| introduction_paths.get(r))
                 .map(|(path, _)| path.clone()),
             sources: vec![source.to_string()],
-            line: None,
+            line,
             package: package.clone(),
         };
         // The same Package can be several components, e.g. nested ones.
@@ -191,6 +196,29 @@ impl Component {
             _ => Scope::Prod,
         }
     }
+}
+
+/// The 1-based line of each `"bom-ref"` and `"purl"` value of an SBOM, by
+/// key and value: the first line that starts with that key and value, as
+/// the CycloneDX tools write them, one per line.
+fn value_lines(text: &str) -> HashMap<(&'static str, String), usize> {
+    let mut lines = HashMap::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim_start();
+        for key in ["bom-ref", "purl"] {
+            let Some(value) = line
+                .strip_prefix(&format!("\"{key}\""))
+                .and_then(|rest| rest.trim_start().strip_prefix(':'))
+            else {
+                continue;
+            };
+            let value = value.trim().trim_end_matches(',');
+            if let Ok(value) = serde_json::from_str::<String>(value) {
+                lines.entry((key, value)).or_insert(number + 1);
+            }
+        }
+    }
+    lines
 }
 
 /// Appends `components` and the components nested in them to `out`.

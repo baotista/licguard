@@ -4463,6 +4463,39 @@ fn check_github_emits_a_warning_annotation_per_warning_on_the_policy_file() {
     );
 }
 
+#[test]
+fn check_github_annotates_a_violation_of_an_sbom_on_its_component() {
+    let deny_epl =
+        "[policy]\nallow = [\"MIT\", \"Apache-2.0\", \"BSD-3-Clause\"]\ndeny = [\"EPL-1.0\"]\n";
+    let project = in_github_workspace(Project::from_fixture("maven-basic").with_policy(deny_epl));
+    check_github(&project, &[]).code(1).stdout(
+        "::error file=target/bom.json,line=306,title=licguard%3A DENY EPL-1.0 junit%3Ajunit@4.13.2::EPL-1.0  via app > junit:junit\n\
+         1 deny · 0 review · 4 allow — ✗ Policy violated (exit 1)\n",
+    );
+    // A component without a `bom-ref` is found by its purl.
+    let project = in_github_workspace(
+        maven_project(|bom| {
+            let components = bom["components"].as_array_mut().unwrap();
+            let junit = components
+                .iter_mut()
+                .find(|c| c["name"] == "junit")
+                .unwrap();
+            junit.as_object_mut().unwrap().remove("bom-ref");
+        })
+        .with_policy(deny_epl),
+    );
+    let line = line_starting_with(
+        &project,
+        MAVEN_SBOM,
+        r#""purl": "pkg:maven/junit/junit@4.13.2"#,
+    );
+    check_github(&project, &[])
+        .code(1)
+        .stdout(predicate::str::starts_with(format!(
+            "::error file=target/bom.json,line={line},title=licguard%3A DENY EPL-1.0 junit%3Ajunit@4.13.2::EPL-1.0\n"
+        )));
+}
+
 /// The 1-based number of the first line of the Project's `file` that starts
 /// with `prefix`, after its indentation.
 fn line_starting_with(project: &Project, file: &str, prefix: &str) -> usize {
