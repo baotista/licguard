@@ -9,6 +9,8 @@ pub(super) struct Purl {
     pub namespace: Option<String>,
     pub name: String,
     pub version: Option<String>,
+    /// The qualifier keys, in lower case, e.g. `type` or `vcs_url`.
+    pub qualifiers: Vec<String>,
 }
 
 impl Purl {
@@ -19,7 +21,8 @@ impl Purl {
             return None;
         }
         let rest = rest.split('#').next().unwrap_or(rest);
-        let path = rest.split('?').next().unwrap_or(rest).trim_matches('/');
+        let (path, qualifiers) = rest.split_once('?').unwrap_or((rest, ""));
+        let path = path.trim_matches('/');
         let (kind, rest) = path.split_once('/')?;
         let (namespace, name) = match rest.rsplit_once('/') {
             Some((namespace, name)) => (Some(namespace), name),
@@ -43,6 +46,12 @@ impl Purl {
             }),
             name: decode(name),
             version,
+            qualifiers: qualifiers
+                .split('&')
+                .filter_map(|q| q.split('=').next())
+                .filter(|key| !key.is_empty())
+                .map(str::to_ascii_lowercase)
+                .collect(),
         })
     }
 }

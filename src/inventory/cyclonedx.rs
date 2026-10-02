@@ -142,7 +142,7 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
                 if prod_only && child.scope() == Scope::Dev {
                     return None;
                 }
-                let name = package(child).map_or_else(|| child.name.clone(), |p| p.name);
+                let name = package(child).map_or_else(|| child.name.clone(), |(p, _)| p.name);
                 Some((name, r.clone()))
             })
             .collect()
@@ -153,13 +153,14 @@ pub fn inventory(project: &Path, source: &str) -> Result<Vec<LicensedPackage>> {
         if component.bom_ref.is_some() && component.bom_ref == root_ref {
             continue; // the root, listed again
         }
-        let Some(package) = package(component) else {
+        let Some((package, from_registry)) = package(component) else {
             continue;
         };
+        let declared_license = declared_license(&component.licenses);
         let found = LicensedPackage {
-            declared_license: declared_license(&component.licenses),
-            license_origin: Some(LicenseOrigin::Sbom),
-            from_registry: true,
+            license_origin: declared_license.as_ref().map(|_| LicenseOrigin::Sbom),
+            declared_license,
+            from_registry,
             scope: component.scope(),
             introduction_path: component
                 .bom_ref
@@ -200,16 +201,28 @@ fn flatten<'a>(components: &'a [Component], out: &mut Vec<&'a Component>) {
     }
 }
 
-/// The Package a component is, from its purl; `None` when it has none, or
-/// one of an ecosystem licguard does not support.
-fn package(component: &Component) -> Option<Package> {
+/// The purl qualifiers that say where a Package comes from, when it is not
+/// its ecosystem's registry.
+const LOCATION_QUALIFIERS: [&str; 3] = ["repository_url", "download_url", "vcs_url"];
+
+/// The Package a component is, from its purl, and whether the purl says it
+/// comes from its ecosystem's registry: when it names no other location
+/// (see [`LOCATION_QUALIFIERS`]). `None` when the component has no purl, or
+/// one of an ecosystem licguard does not support. Other qualifiers, e.g.
+/// Maven's `type` and `classifier`, name files of the same Package.
+fn package(component: &Component) -> Option<(Package, bool)> {
     let purl = Purl::parse(component.purl.as_deref()?)?;
     let ecosystem = Ecosystem::from_purl_type(&purl.kind)?;
-    Some(Package {
+    let package = Package {
         ecosystem,
         name: ecosystem.package_name(purl.namespace.as_deref(), &purl.name),
         version: purl.version.or_else(|| component.version.clone())?,
-    })
+    };
+    let from_registry = !purl
+        .qualifiers
+        .iter()
+        .any(|key| LOCATION_QUALIFIERS.contains(&key.as_str()));
+    Some((package, from_registry))
 }
 
 /// The Declared license of a component's `licenses`: each entry's

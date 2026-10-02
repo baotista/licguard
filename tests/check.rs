@@ -3333,6 +3333,93 @@ fn maven_component_without_a_license_is_unresolved_without_a_registry_request() 
     assert_eq!(project.registry.paths(), Vec::<String>::new());
 }
 
+#[test]
+fn clarification_of_a_maven_package_takes_priority_over_the_sbom_license() {
+    Project::from_fixture("maven-basic")
+        .with_policy(&format!(
+            "{MAVEN_POLICY}{}",
+            clarification("junit:junit", Some("4.13.2"), "MIT")
+        ))
+        .list_with(&[])
+        .success()
+        .stdout(predicate::str::contains(
+            "ALLOW  MIT           junit:junit@4.13.2                       listed  clarification  via app > junit:junit\n",
+        ));
+}
+
+#[test]
+fn waiver_of_a_maven_package_matches_its_group_and_artifact() {
+    Project::from_fixture("maven-basic")
+        .with_policy(&format!(
+            "{MAVEN_POLICY}{}",
+            waiver("junit:junit", Some("4.13.2"), "EPL-1.0")
+        ))
+        .check_with(&["--strict"])
+        .success()
+        .stdout(predicate::str::contains(
+            "0 deny · 0 review · 5 allow (1 waived)",
+        ));
+}
+
+#[test]
+fn waive_writes_the_waiver_of_a_maven_package_that_check_then_accepts() {
+    let project = Project::from_fixture("maven-basic").with_policy(MAVEN_POLICY);
+    project
+        .waive_with(&[&WAIVE_ALL[..], &["--strict"]].concat())
+        .success();
+    assert_eq!(
+        project.policy_file(),
+        format!(
+            "{MAVEN_POLICY}{}",
+            waived("junit:junit", "4.13.2", "EPL-1.0")
+        )
+    );
+    project.check_with(&["--strict"]).success();
+}
+
+/// `npm-sbom` without the `licenses` of its `once` and `wrappy` components,
+/// with the purl of `once` ending in `qualifiers`, under [`ALLOW_ALL`].
+fn npm_sbom_licensed_by_the_registry(qualifiers: &str) -> Project {
+    let project = Project::from_fixture("npm-sbom").with_policy(ALLOW_ALL);
+    let path = project.path().join("bom.cdx.json");
+    let mut bom: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for component in bom["components"].as_array_mut().unwrap() {
+        if component["name"] == "once" || component["name"] == "wrappy" {
+            component.as_object_mut().unwrap().remove("licenses");
+        }
+        if component["name"] == "once" {
+            component["purl"] = format!("pkg:npm/once@1.4.0{qualifiers}").into();
+        }
+    }
+    fs::write(path, serde_json::to_string_pretty(&bom).unwrap()).unwrap();
+    project
+        .with_registry_response("/once/1.4.0", &[(200, r#"{"license":"ISC"}"#)])
+        .with_registry_response("/wrappy/1.0.2", &[(200, r#"{"license":"ISC"}"#)])
+}
+
+#[test]
+fn npm_component_without_a_license_gets_it_from_the_registry() {
+    let project = npm_sbom_licensed_by_the_registry("");
+    let json = stdout_json(project.list_with(&["--format", "json"]).success());
+    let once = json_package(&json["packages"], "once", "1.4.0");
+    assert_eq!(once["license"], "ISC");
+    assert_eq!(once["origin"], "registry");
+    assert_eq!(project.registry.paths(), ["/once/1.4.0", "/wrappy/1.0.2"]);
+}
+
+#[test]
+fn npm_component_whose_purl_names_another_location_is_not_from_the_registry() {
+    for qualifiers in [
+        "?vcs_url=git%2Bhttps://github.com/isaacs/once.git",
+        "?download_url=https://example.com/once-1.4.0.tgz",
+        "?repository_url=https://npm.example.com",
+    ] {
+        let project = npm_sbom_licensed_by_the_registry(qualifiers);
+        assert_once_is_not_from_the_registry(&project, qualifiers);
+    }
+}
+
 /// The SBOM of the `npm-sbom` fixture.
 fn npm_sbom() -> String {
     fs::read_to_string(
