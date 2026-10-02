@@ -3326,6 +3326,30 @@ fn several_component_licenses_all_apply() {
             "sbom"
         ]
     );
+    // A license name that reads as a choice is a choice within its entry
+    // only: it never offers a way out of the other entries.
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"name": "MIT or Apache License, Version 2.0"}},
+            {"license": {"id": "EPL-1.0"}},
+        ])),
+        [
+            "(MIT or Apache License, Version 2.0) AND EPL-1.0",
+            "(MIT OR Apache-2.0) AND EPL-1.0",
+            "sbom"
+        ]
+    );
+    assert_eq!(
+        junit_license(serde_json::json!([
+            {"license": {"name": "MIT/Apache-2.0"}},
+            {"license": {"id": "EPL-1.0"}},
+        ])),
+        [
+            "(MIT/Apache-2.0) AND EPL-1.0",
+            "(MIT OR Apache-2.0) AND EPL-1.0",
+            "sbom"
+        ]
+    );
 }
 
 #[test]

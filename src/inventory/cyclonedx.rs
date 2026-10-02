@@ -286,7 +286,8 @@ fn package(component: &Component) -> Option<(Package, bool)> {
 
 /// The Declared license of a component's `licenses`: each entry's
 /// `license.id`, else its `license.name`, or its `expression`. Several
-/// entries all apply, so they are joined with `AND`. `None` when there is
+/// entries all apply, so they are joined with `AND`, each in parentheses
+/// unless it is a single word. `None` when there is
 /// no entry. When an entry has none of them, e.g. only a `url`, it is the
 /// JSON text of `licenses`, which never normalizes: the Package is
 /// Unresolved rather than taking the license of its other entries.
@@ -298,12 +299,15 @@ fn declared_license(licenses: &[serde_json::Value]) -> Option<String> {
         .iter()
         .map(|entry| {
             let choice = LicenseChoice::deserialize(entry).ok()?;
-            match (choice.license, choice.expression) {
-                (Some(license), _) => license.id.or(license.name),
-                (None, Some(expression)) if licenses.len() > 1 => Some(format!("({expression})")),
-                (None, Some(expression)) => Some(expression),
-                (None, None) => None,
-            }
+            let term = match (choice.license, choice.expression) {
+                (Some(license), _) => license.id.or(license.name)?,
+                (None, expression) => expression?,
+            };
+            // So that an `OR` in one entry, even an `or` or `/` in a name,
+            // offers no way out of the others.
+            let grouped =
+                licenses.len() > 1 && term.contains(|c: char| c.is_whitespace() || c == '/');
+            Some(if grouped { format!("({term})") } else { term })
         })
         .collect();
     Some(terms.map_or_else(
